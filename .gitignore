@@ -1,0 +1,16 @@
+# Memory dump files
+*.raw
+*.vmem
+
+# Image files
+*.jpg
+*.jpeg
+
+# JetBrains IDE (PyCharm, etc.)
+.idea/
+
+# Optional: also ignore other common IDE/files
+*.pyc
+__pycache__/
+.DS_Store
+.env
