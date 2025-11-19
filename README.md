@@ -34,9 +34,12 @@ git clone https://github.com/khrnrn/VAST.git
 cd VAST
 
 # install dependencies
-pip install -r requirements.txt
+pip install volatility3
 
 # run VAST on a snapshot file
+python parser.py "/path/to/snapshot.vmem or .sav"
+python Memory_extractor.py "/path/to/raw"
+python Artifact_enhancer.py "/path/to/json"
 python vast.py --input /path/to/snapshot.vmsn --os windows --output report.json
 ```
 
