@@ -1,6 +1,16 @@
 # Memory dump files
 *.raw
 *.vmem
+*.sav
+*.vmsn
+
+# Test files (do not commit)
+test.vmem
+test.sav
+
+# Output directory
+output/
+*.json
 
 # Image files
 *.jpg
@@ -9,8 +19,21 @@
 # JetBrains IDE (PyCharm, etc.)
 .idea/
 
-# Optional: also ignore other common IDE/files
+# Python
 *.pyc
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# OS files
 .DS_Store
 .env
+Thumbs.db
+
+# Volatility cache
+*.cache

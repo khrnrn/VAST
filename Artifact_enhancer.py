@@ -291,7 +291,11 @@ def main(argv=None) -> int:
     if args.output:
         out_path = Path(args.output).resolve()
     else:
-        out_path = curr_path.with_name(curr_path.stem + "_enriched.json")
+        from pathlib import Path as P
+        script_dir = P(__file__).resolve().parent
+        output_dir = script_dir / "output" / "enhanced"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / f"{curr_path.stem}_enriched.json"
 
     out_path.write_text(out_text, encoding="utf-8")
     print(f"Enriched result written to {out_path}")

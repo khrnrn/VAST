@@ -23,7 +23,8 @@ def generate_output_path(input_path: Path) -> Path:
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"snapshot_{timestamp}"
-    output_dir = get_script_dir()
+    output_dir = get_script_dir() / "output" / "raw"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Avoid collision: add counter if needed
     counter = 0
@@ -143,6 +144,6 @@ if __name__ == "__main__":
     for k, v in result.items():
         print(f"{k}: {v}")
     if result["success"]:
-        print(f"\n✅ Raw memory dumped to: {result['output_raw']}")
+        print(f"\n[SUCCESS] Raw memory dumped to: {result['output_raw']}")
     else:
-        print(f"\n❌ Failed: {result['warnings']}")
+        print(f"\n[FAILED] {result['warnings']}")
