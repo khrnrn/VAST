@@ -118,19 +118,19 @@ If you prefer to run each stage individually:
 
 ```bash
 # Step 1: Parse snapshot
-python parser.py test.vmem
+python parser.py test.vmem --session output/<label>
 
 # Step 2: Extract memory artifacts
-python memory_extractor.py output/raw/snapshot_*.raw
+python memory_extractor.py output/<label>/raw/snapshot_*.raw --session output/<label>
 
 # Step 3: Extract file artifacts
-python file_extractor.py output/raw/snapshot_*.raw
+python file_extractor.py output/<label>/raw/snapshot_*.raw --session output/<label>
 
 # Step 4a: Enhance memory artifacts (optional)
-python artifact_enhancer.py output/extracted_memory/snapshot_*_memory.json
+python artifact_enhancer.py output/<label>/extracted_memory/snapshot_*_memory.json --session output/<label>
 
 # Step 4b: Enhance file artifacts (optional)
-python artifact_enhancer.py output/extracted_files/snapshot_*_file_activity.json
+python artifact_enhancer.py output/<label>/extracted_files/snapshot_*_file_activity.json --session output/<label>
 ```
 
 ## 📊 Output Examples

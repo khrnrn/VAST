@@ -16,14 +16,14 @@ def get_script_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def generate_output_path(input_path: Path) -> Path:
+def generate_output_path(input_path: Path, session_dir: Path) -> Path:
     """
     Generate a unique output path in the script's directory.
     Format: snapshot_YYYYMMDD_HHMMSS_XXXXXX.raw
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"snapshot_{timestamp}"
-    output_dir = get_script_dir() / "output" / "raw"
+    output_dir = session_dir / "raw"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Avoid collision: add counter if needed
@@ -36,7 +36,7 @@ def generate_output_path(input_path: Path) -> Path:
         counter += 1
 
 
-def parse_snapshot(file_path: str) -> dict:
+def parse_snapshot(file_path: str, session_dir: Path) -> dict:
     """
     Parse VMware (.vmem) or VirtualBox (.sav) snapshot into raw memory dump.
     Output .raw file is saved in the same folder as parser.py.
@@ -70,18 +70,18 @@ def parse_snapshot(file_path: str) -> dict:
 
     if file_path.suffix.lower() == ".vmem":
         result["format"] = "vmware"
-        return _handle_vmem(file_path, result)
+        return _handle_vmem(file_path, session_dir, result)
 
     elif file_path.suffix.lower() == ".sav":
         result["format"] = "virtualbox"
-        return _handle_sav(file_path, result)
+        return _handle_sav(file_path, session_dir, result)
 
     else:
         result["warnings"].append(f"Unsupported file extension: {file_path.suffix}")
         return result
 
 
-def _handle_vmem(file_path: Path, result: dict) -> dict:
+def _handle_vmem(file_path: str, session_dir: Path, result: dict) -> dict:
     """VMware .vmem is already a raw memory dump. Copy to project folder."""
     try:
         size = file_path.stat().st_size
@@ -89,7 +89,7 @@ def _handle_vmem(file_path: Path, result: dict) -> dict:
             result["warnings"].append("File is empty")
             return result
 
-        output_path = generate_output_path(file_path)
+        output_path = generate_output_path(file_path, session_dir)
         shutil.copyfile(file_path, output_path)
         result["output_raw"] = str(output_path)
 
@@ -103,7 +103,7 @@ def _handle_vmem(file_path: Path, result: dict) -> dict:
         return result
 
 
-def _handle_sav(file_path: Path, result: dict) -> dict:
+def _handle_sav(file_path: str, session_dir: Path, result: dict) -> dict:
     """
     Handle VirtualBox .sav file.
     For simplicity, copy as-is to project folder with warning.
@@ -119,7 +119,7 @@ def _handle_sav(file_path: Path, result: dict) -> dict:
             "For best results, convert .sav to raw memory using VBoxManage first."
         )
 
-        output_path = generate_output_path(file_path)
+        output_path = generate_output_path(file_path, session_dir)
         shutil.copyfile(file_path, output_path)
         result["output_raw"] = str(output_path)
 
@@ -135,14 +135,21 @@ def _handle_sav(file_path: Path, result: dict) -> dict:
 
 # CLI for testing
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python parser.py <snapshot.vmem|.sav>")
-        sys.exit(1)
+    import argparse
 
-    result = parse_snapshot(sys.argv[1])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("snapshot", help="Path to VM snapshot (.vmem/.sav)")
+    parser.add_argument("--session", required=True, help="Session folder from vast.py")
+    args = parser.parse_args()
+
+    session_dir = Path(args.session)
+
+    result = parse_snapshot(args.snapshot, session_dir)
+
     print("\n=== Parser Result ===")
     for k, v in result.items():
         print(f"{k}: {v}")
+
     if result["success"]:
         print(f"\n[SUCCESS] Raw memory dumped to: {result['output_raw']}")
     else:
