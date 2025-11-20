@@ -295,7 +295,7 @@ VAST has been validated against:
 * **Khairunnurrin Zurain Binte Khairon Jazan** - Project Lead, Integration & Testing
 * **Nur Nabilah Binte Zainal** - Reporting & Visualization
 * **Amelia Binte Marzuki** - File/Activity Artifact Extractor
-* **Muhammad Solikhin - Snapshot Parser Development
+* **Muhammad Solikhin** - Snapshot Parser Development
 * **Mustaq Yunos** - Memory Artifact Extractor
 
 ## 📄 License
