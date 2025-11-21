@@ -44,15 +44,15 @@ def main():
         description="VAST - Volatile Artifact Snapshot Triage: Full pipeline orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Run full pipeline on VMware snapshot
-  python vast.py --input test.vmem --os windows
-  
-  # Run with baseline comparison
-  python vast.py --input test.vmem --baseline baseline_memory.json
-  
-  # Skip enhancement phase
-  python vast.py --input test.vmem --skip-enhance
+        Examples:
+        # Run full pipeline on VMware snapshot
+        python vast.py --input test.vmem --os windows
+        
+        # Run with baseline comparison
+        python vast.py --input test.vmem --baseline baseline_memory.json
+        
+        # Skip enhancement phase
+        python vast.py --input test.vmem --skip-enhance
         """
     )
     parser.add_argument(
@@ -90,6 +90,24 @@ Examples:
         print(f"ERROR: Input file not found: {input_path}")
         return 1
     
+    # ---------------------------------------------------------
+    # CREATE TIMESTAMP SESSION DIRECTORY
+    # ---------------------------------------------------------
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = Path("output") / timestamp
+
+    # Create subfolders
+    (session_dir / "raw").mkdir(parents=True, exist_ok=True)
+    (session_dir / "extracted_memory").mkdir(parents=True, exist_ok=True)
+    (session_dir / "extracted_files").mkdir(parents=True, exist_ok=True)
+    (session_dir / "enhanced").mkdir(parents=True, exist_ok=True)
+    (session_dir / "reports").mkdir(parents=True, exist_ok=True)
+
+    print(f"[VAST] Session directory: {session_dir}")
+    
+
     print("\n" + "="*60)
     print("VAST - Volatile Artifact Snapshot Triage")
     print("="*60)
@@ -99,13 +117,15 @@ Examples:
     
     # Step 1: Parse snapshot
     if not run_command(
-        [sys.executable, "parser.py", str(input_path)],
+        [
+            sys.executable, "parser.py", str(input_path), 
+            "--session", str(session_dir)],
         "Step 1/5: Parsing VM snapshot"
     ):
         return 1
     
     # Find the generated raw file
-    raw_file = get_latest_file("output/raw/snapshot_*.raw")
+    raw_file = get_latest_file(f"{session_dir}/raw/snapshot_*.raw")
     if not raw_file:
         print("ERROR: Could not find generated raw memory file")
         return 1
@@ -113,13 +133,18 @@ Examples:
     
     # Step 2: Extract memory artifacts
     if not run_command(
-        [sys.executable, "memory_extractor.py", str(raw_file), "--os", args.os],
+            [
+                sys.executable, "memory_extractor.py",
+                str(raw_file),
+                "--os", args.os,
+                "--session", str(session_dir)
+            ],
         "Step 2/5: Extracting memory artifacts (processes, network)"
     ):
         return 1
     
     # Find memory extraction JSON
-    memory_json = get_latest_file("output/extracted_memory/*_memory.json")
+    memory_json = get_latest_file(f"{session_dir}/extracted_memory/*_memory.json")
     if not memory_json:
         print("ERROR: Could not find memory extraction JSON")
         return 1
@@ -127,13 +152,18 @@ Examples:
     
     # Step 3: Extract file/activity artifacts
     if not run_command(
-        [sys.executable, "file_extractor.py", str(raw_file), "--os", args.os],
+            [
+                sys.executable, "file_extractor.py",
+                str(raw_file),
+                "--os", args.os,
+                "--session", str(session_dir)
+            ],
         "Step 3/5: Extracting file/activity artifacts"
     ):
         return 1
     
     # Find file extraction JSON
-    file_json = get_latest_file("output/extracted_files/*_file_activity.json")
+    file_json = get_latest_file(f"{session_dir}/extracted_files/*_file_activity.json")
     if not file_json:
         print("ERROR: Could not find file extraction JSON")
         return 1
@@ -145,7 +175,12 @@ Examples:
     
     if not args.skip_enhance:
         # Enhance memory artifacts
-        enhance_cmd = [sys.executable, "artifact_enhancer.py", str(memory_json)]
+        enhance_cmd = [
+            sys.executable, "artifact_enhancer.py",
+            str(memory_json),
+            "--session", str(session_dir)
+        ]
+
         if args.baseline:
             enhance_cmd.extend(["--baseline", args.baseline])
         if args.ioc:
@@ -155,12 +190,17 @@ Examples:
             enhance_cmd,
             "Step 4a/5: Enhancing memory artifacts with threat intelligence"
         ):
-            memory_enhanced = get_latest_file("output/enhanced/*_memory_enriched.json")
+            memory_enhanced = get_latest_file(f"{session_dir}/enhanced/*_memory_enriched.json")
         else:
             print("WARNING: Memory enhancement failed, continuing...\n")
         
         # Enhance file artifacts
-        enhance_cmd = [sys.executable, "artifact_enhancer.py", str(file_json)]
+        enhance_cmd = [
+            sys.executable, "artifact_enhancer.py",
+            str(file_json),
+            "--session", str(session_dir)
+        ]
+
         if args.baseline:
             enhance_cmd.extend(["--baseline", args.baseline])
         if args.ioc:
@@ -170,7 +210,7 @@ Examples:
             enhance_cmd,
             "Step 4b/5: Enhancing file artifacts with threat intelligence"
         ):
-            file_enhanced = get_latest_file("output/enhanced/*_file_activity_enriched.json")
+            file_enhanced = get_latest_file(f"{session_dir}/enhanced/*_file_activity_enriched.json")
         else:
             print("WARNING: File enhancement failed, continuing...\n")
     
@@ -231,11 +271,7 @@ Examples:
     if args.output:
         output_path = Path(args.output)
     else:
-        output_dir = Path("output/reports")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # Use timestamp from raw file for consistency
-        timestamp = raw_file.stem.replace("snapshot_", "")
-        output_path = output_dir / f"vast_report_{timestamp}.json"
+        output_path = session_dir / "reports" / f"vast_report_{timestamp}.json"
     
     # Write report
     with open(output_path, 'w') as f:

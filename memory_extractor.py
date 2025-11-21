@@ -253,6 +253,11 @@ def main(argv: List[str]) -> int:
              "next to the raw file.",
     )
 
+    parser.add_argument(
+        "--session",
+        help="Session directory (from vast.py)"
+    )
+
     args = parser.parse_args(argv)
 
     extractor = MemoryArtifactExtractor(
@@ -266,7 +271,11 @@ def main(argv: List[str]) -> int:
     if args.output_json:
         out_path = Path(args.output_json).resolve()
     else:
-        output_dir = get_script_dir() / "output" / "extracted_memory"
+        if args.session:
+            output_dir = Path(args.session) / "extracted_memory"
+        else:
+            output_dir = get_script_dir() / "output" / "extracted_memory"
+
         output_dir.mkdir(parents=True, exist_ok=True)
         raw_path = Path(args.raw_file).resolve()
         out_path = output_dir / f"{raw_path.stem}_memory.json"

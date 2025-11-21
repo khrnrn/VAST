@@ -268,6 +268,11 @@ def main(argv=None) -> int:
         ),
         default=None,
     )
+    parser.add_argument(
+        "--session", 
+        help="Session directory from vast.py"
+    )
+
 
     args = parser.parse_args(argv)
 
@@ -293,7 +298,11 @@ def main(argv=None) -> int:
     else:
         from pathlib import Path as P
         script_dir = P(__file__).resolve().parent
-        output_dir = script_dir / "output" / "enhanced"
+        if args.session:
+            output_dir = Path(args.session) / "enhanced"
+        else:
+            output_dir = script_dir / "output" / "enhanced"
+
         output_dir.mkdir(parents=True, exist_ok=True)
         out_path = output_dir / f"{curr_path.stem}_enriched.json"
 

@@ -359,6 +359,10 @@ def main(argv: List[str]) -> int:
              "If omitted, a default '<raw_stem>_file_activity.json' will be created "
              "in the output/ folder.",
     )
+    parser.add_argument(
+        "--session", 
+        help="Session directory from vast.py"
+    )
 
     args = parser.parse_args(argv)
 
@@ -374,7 +378,11 @@ def main(argv: List[str]) -> int:
         out_path = Path(args.output_json).resolve()
     else:
         # Create output directory if it doesn't exist
-        output_dir = get_script_dir() / "output" / "extracted_files"
+        if args.session:
+            output_dir = Path(args.session) / "extracted_files"
+        else:
+            output_dir = get_script_dir() / "output" / "extracted_files"
+
         output_dir.mkdir(parents=True, exist_ok=True)
         
         raw_path = Path(args.raw_file).resolve()
