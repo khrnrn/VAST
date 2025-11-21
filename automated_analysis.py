@@ -25,6 +25,13 @@ MITRE_MAP = {
     "chrome.exe": "T1105 - Exfiltration/Browser"
 }
 
+WINDOWS_SYSTEM_PROCESSES = {
+    "system", "registry", "smss.exe", "csrss.exe", "wininit.exe", 
+    "services.exe", "lsass.exe", "svchost.exe", "winlogon.exe",
+    "explorer.exe", "taskhostw.exe", "dwm.exe", "fontdrvhost.exe",
+    "runtimebroker.exe", "searchapp.exe", "dllhost.exe"
+}
+
 def detect_process_red_flags(processes):
     red_flags = []
 
@@ -33,26 +40,31 @@ def detect_process_red_flags(processes):
             continue
             
         name = str(p.get("ImageFileName", "")).lower().strip().replace("\u0000", "")
-        # Use ImagePath instead of path (Volatility field name)
+        
+        # Skip whitelisted Windows processes for MITRE detection
+        if name in WINDOWS_SYSTEM_PROCESSES:
+            continue  # Don't flag normal Windows processes
+        
         path = str(p.get("ImagePath", p.get("path", ""))).lower()
         threads = p.get("Threads", 0)
         cmd = str(p.get("CommandLine", "")).lower()
 
-        # Executing from suspicious directories
-        if path and any(susp in path for susp in ["appdata", "temp", "\\users\\", "downloads"]):
-            red_flags.append(f"{name} running from non-standard path: {path}")
+        # Only flag suspicious paths (not system32)
+        if path and "appdata" in path or "temp" in path or "downloads" in path:
+            if "\\windows\\system32\\" not in path:
+                red_flags.append(f"{name} running from suspicious path: {path}")
 
-        # High thread count
-        if isinstance(threads, int) and threads > 50:
-            red_flags.append(f"{name} has high thread count: {threads}")
+        # Only flag very high thread counts (>100)
+        if isinstance(threads, int) and threads > 100:
+            red_flags.append(f"{name} has unusually high thread count: {threads}")
 
-        # Suspicious command lines
+        # Check for encoded commands
         if cmd and ("encodedcommand" in cmd or " -e " in cmd or "-enc" in cmd):
-            red_flags.append(f"{name} using encoded PowerShell commands")
+            red_flags.append(f"[CRITICAL] {name} using encoded PowerShell commands")
 
-        # MITRE Detection
-        if name and name in MITRE_MAP:
-            red_flags.append(f"{name} linked to MITRE Technique: {MITRE_MAP[name]}")
+        # Only flag non-system processes for MITRE
+        if name and name in MITRE_MAP and name not in WINDOWS_SYSTEM_PROCESSES:
+            red_flags.append(f"{name} linked to MITRE: {MITRE_MAP[name]}")
 
     return red_flags
 
@@ -66,18 +78,22 @@ def detect_network_anomalies(conns):
             
         port = str(c.get("ForeignPort", ""))
         ip = str(c.get("ForeignAddr", ""))
-        state = str(c.get("State", ""))
+        state = str(c.get("State", "")).upper()
 
-        # Skip localhost and empty IPs
-        if not ip or ip in ["0.0.0.0", "127.0.0.1", "::1", "*"]:
+        # Skip localhost, empty IPs, and CLOSED connections
+        if not ip or ip in ["0.0.0.0", "127.0.0.1", "::1", "*", "None", ":::0"]:
             continue
+        
+        if state in ["CLOSED", "CLOSE_WAIT", "TIME_WAIT"]:
+            continue  # Skip closed connections
 
-        # External connection
-        anomalies.append(f"External connection to {ip}:{port} [{state}]")
+        # Only report ESTABLISHED or LISTENING external connections
+        if state in ["ESTABLISHED", "LISTENING"]:
+            anomalies.append(f"Active connection to {ip}:{port} [{state}]")
 
-        # Suspicious ports
+        # Flag suspicious ports
         if port in ["4444", "1337", "8081", "31337"]:
-            anomalies.append(f"[CRITICAL] Connection to suspicious C2 port: {port}")
+            anomalies.append(f"[CRITICAL] Connection to C2 port {port} → {ip}")
 
     return anomalies
 
@@ -193,15 +209,19 @@ class AutomatedAnalyzer:
         )
         
         if env_data and isinstance(env_data, list):
+            usernames_set = set()  # Use set to avoid duplicates
             for entry in env_data:
                 if isinstance(entry, dict):
                     var_name = entry.get("Variable", "")
                     if var_name == "COMPUTERNAME":
                         self.analysis_results["system_info"]["computer_name"] = entry.get("Value", "Unknown")
                     elif var_name == "USERNAME":
-                        if "usernames" not in self.analysis_results["system_info"]:
-                            self.analysis_results["system_info"]["usernames"] = []
-                        self.analysis_results["system_info"]["usernames"].append(entry.get("Value"))
+                        username = entry.get("Value")
+                        if username:
+                            usernames_set.add(username)
+        
+            # Convert set to sorted list
+            self.analysis_results["system_info"]["usernames"] = sorted(list(usernames_set))
     
     def analyze_processes(self):
         """Analyze process information from extraction JSON."""
@@ -451,6 +471,19 @@ class AutomatedAnalyzer:
             })
         
         self.analysis_results["suspicious_findings"] = findings
+
+    def calculate_risk_score(self) -> int:
+        """Calculate overall risk score 0-100"""
+        score = 0
+        
+        threats = self.analysis_results.get("suspicious_findings", [])
+        high = len([f for f in threats if f["severity"] == "HIGH"])
+        medium = len([f for f in threats if f["severity"] == "MEDIUM"])
+        
+        score += high * 30
+        score += medium * 15
+        
+        return min(score, 100)
     
     def generate_summary(self):
         """Generate executive summary."""
@@ -458,6 +491,7 @@ class AutomatedAnalyzer:
         
         summary = {
             "analysis_timestamp": self.analysis_results["timestamp"],
+            "risk_score": self.calculate_risk_score(),
             "system": {
                 "computer_name": self.analysis_results["system_info"].get("computer_name", "Unknown"),
                 "users": self.analysis_results["system_info"].get("usernames", [])
@@ -511,14 +545,36 @@ def generate_text_report(analysis: Dict[str, Any]) -> str:
     report.append("VAST AUTOMATED FORENSIC ANALYSIS REPORT")
     report.append("="*80)
     report.append("")
+
+    # Add timestamp
+    timestamp = analysis.get("timestamp", "Unknown")
+    report.append(f"Generated: {timestamp}")
+    report.append("")
     
     # System Information
     report.append("SYSTEM INFORMATION")
     report.append("-"*80)
     summary = analysis.get("summary", {})
+    risk_score = summary.get("risk_score", 0)
+    report.append(f"Overall Risk Score: {risk_score}/100")
     system = summary.get("system", {})
     report.append(f"Computer Name: {system.get('computer_name', 'Unknown')}")
-    report.append(f"Users Found: {', '.join(system.get('users', ['None']))}")
+    
+    # Show unique users only
+    users = system.get('users', [])
+    unique_users = sorted(set(users))[:10]  # Top 10 unique users
+    report.append(f"Unique Users: {', '.join(unique_users) if unique_users else 'None'}")
+    report.append("")
+
+    report.append("KEY INDICATORS")
+    report.append("-"*80)
+    procs = summary.get("processes", {})
+    net = summary.get("network", {})
+    threats = summary.get("threats", {})
+
+    report.append(f"Suspicious Processes: {procs.get('suspicious', 0)}")
+    report.append(f"Active External Connections: {net.get('external', 0)}")
+    report.append(f"High Severity Findings: {threats.get('high_severity', 0)}")
     report.append("")
     
     # Executive Summary
@@ -646,6 +702,24 @@ def generate_text_report(analysis: Dict[str, Any]) -> str:
         for ext, count in extensions[:10]:
             report.append(f"  .{ext}: {count} file(s)")
         report.append("")
+    
+    report.append("RECOMMENDATIONS")
+    report.append("-"*80)
+    
+    threats = summary.get("threats", {})
+    procs = summary.get("processes", {})
+    net = summary.get("network", {})
+    
+    if threats.get('high_severity', 0) > 0:
+        report.append("  [!] Immediate action required - high severity threats detected")
+    if procs.get('suspicious', 0) > 5:
+        report.append("  [!] Review suspicious processes for malware")
+    if net.get('external', 0) > 10:
+        report.append("  [!] Investigate external network connections")
+    if threats.get('total_findings', 0) == 0:
+        report.append("  [OK] No immediate threats detected")
+
+    report.append("")
     
     report.append("="*80)
     report.append("END OF REPORT")
