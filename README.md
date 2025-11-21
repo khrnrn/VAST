@@ -158,6 +158,7 @@ NETWORK ANOMALIES
 
 **Incident Response:**
 ```bash
+<<<<<<< HEAD
 # Analyze suspicious system
 python vast.py --input incident.vmem --os windows
 
@@ -166,6 +167,22 @@ grep "HIGH" output/*/reports/automated_analysis.txt
 
 # Check suspicious processes
 cat output/*/enhanced/*_memory_enriched.json | jq '.processes[] | select(.suspicious_score > 5)'
+=======
+# Step 1: Parse snapshot
+python parser.py test.vmem --session output/<label>
+
+# Step 2: Extract memory artifacts
+python memory_extractor.py output/<label>/raw/snapshot_*.raw --session output/<label>
+
+# Step 3: Extract file artifacts
+python file_extractor.py output/<label>/raw/snapshot_*.raw --session output/<label>
+
+# Step 4a: Enhance memory artifacts (optional)
+python artifact_enhancer.py output/<label>/extracted_memory/snapshot_*_memory.json --session output/<label>
+
+# Step 4b: Enhance file artifacts (optional)
+python artifact_enhancer.py output/<label>/extracted_files/snapshot_*_file_activity.json --session output/<label>
+>>>>>>> 3f23c21429ced5d8107f1b7f8d62ed56645f6cfa
 ```
 
 **Baseline Comparison:**

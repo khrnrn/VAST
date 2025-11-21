@@ -44,15 +44,15 @@ def main():
         description="VAST - Volatile Artifact Snapshot Triage: Full pipeline orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-        Examples:
-        # Run full pipeline on VMware snapshot
-        python vast.py --input test.vmem --os windows
-        
-        # Run with baseline comparison
-        python vast.py --input test.vmem --baseline baseline_memory.json
-        
-        # Skip enhancement phase
-        python vast.py --input test.vmem --skip-enhance
+                Examples:
+              # Run full pipeline on VMware snapshot
+              python vast.py --input test.vmem --os windows
+              
+              # Run with baseline comparison
+              python vast.py --input test.vmem --baseline baseline_memory.json
+              
+              # Skip enhancement phase
+              python vast.py --input test.vmem --skip-enhance
         """
     )
     parser.add_argument(
@@ -108,6 +108,24 @@ def main():
     print(f"[VAST] Session directory: {session_dir}")
     
 
+    # ---------------------------------------------------------
+    # CREATE TIMESTAMP SESSION DIRECTORY
+    # ---------------------------------------------------------
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = Path("output") / timestamp
+
+    # Create subfolders
+    (session_dir / "raw").mkdir(parents=True, exist_ok=True)
+    (session_dir / "extracted_memory").mkdir(parents=True, exist_ok=True)
+    (session_dir / "extracted_files").mkdir(parents=True, exist_ok=True)
+    (session_dir / "enhanced").mkdir(parents=True, exist_ok=True)
+    (session_dir / "reports").mkdir(parents=True, exist_ok=True)
+
+    print(f"[VAST] Session directory: {session_dir}")
+    
+
     print("\n" + "="*60)
     print("VAST - Volatile Artifact Snapshot Triage")
     print("="*60)
@@ -125,6 +143,7 @@ def main():
         return 1
     
     # Find the generated raw file
+    raw_file = get_latest_file(f"{session_dir}/raw/snapshot_*.raw")
     raw_file = get_latest_file(f"{session_dir}/raw/snapshot_*.raw")
     if not raw_file:
         print("ERROR: Could not find generated raw memory file")
@@ -145,6 +164,7 @@ def main():
     
     # Find memory extraction JSON
     memory_json = get_latest_file(f"{session_dir}/extracted_memory/*_memory.json")
+    memory_json = get_latest_file(f"{session_dir}/extracted_memory/*_memory.json")
     if not memory_json:
         print("ERROR: Could not find memory extraction JSON")
         return 1
@@ -164,6 +184,7 @@ def main():
     
     # Find file extraction JSON
     file_json = get_latest_file(f"{session_dir}/extracted_files/*_file_activity.json")
+    file_json = get_latest_file(f"{session_dir}/extracted_files/*_file_activity.json")
     if not file_json:
         print("ERROR: Could not find file extraction JSON")
         return 1
@@ -181,6 +202,12 @@ def main():
             "--session", str(session_dir)
         ]
 
+        enhance_cmd = [
+            sys.executable, "artifact_enhancer.py",
+            str(memory_json),
+            "--session", str(session_dir)
+        ]
+
         if args.baseline:
             enhance_cmd.extend(["--baseline", args.baseline])
         if args.ioc:
@@ -191,10 +218,17 @@ def main():
             "Step 4a/6: Enhancing memory artifacts with threat intelligence"
         ):
             memory_enhanced = get_latest_file(f"{session_dir}/enhanced/*_memory_enriched.json")
+            memory_enhanced = get_latest_file(f"{session_dir}/enhanced/*_memory_enriched.json")
         else:
             print("WARNING: Memory enhancement failed, continuing...\n")
         
         # Enhance file artifacts
+        enhance_cmd = [
+            sys.executable, "artifact_enhancer.py",
+            str(file_json),
+            "--session", str(session_dir)
+        ]
+
         enhance_cmd = [
             sys.executable, "artifact_enhancer.py",
             str(file_json),
@@ -210,6 +244,7 @@ def main():
             enhance_cmd,
             "Step 4b/6: Enhancing file artifacts with threat intelligence"
         ):
+            file_enhanced = get_latest_file(f"{session_dir}/enhanced/*_file_activity_enriched.json")
             file_enhanced = get_latest_file(f"{session_dir}/enhanced/*_file_activity_enriched.json")
         else:
             print("WARNING: File enhancement failed, continuing...\n")
@@ -271,6 +306,7 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
+        output_path = session_dir / "reports" / f"vast_report_{timestamp}.json"
         output_path = session_dir / "reports" / f"vast_report_{timestamp}.json"
     
     # Write report
