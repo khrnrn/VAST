@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#file_extractor.py
 import json
 import logging
 import subprocess
@@ -74,11 +75,8 @@ class FileActivityExtractor:
                 f"Place vol.py in the same folder or pass --vol-path."
             )
 
-        if self.os_type != "windows":
-            self.result.warnings.append(
-                f"OS type '{self.os_type}' not fully supported yet. "
-                "Defaulting to Windows plugins."
-            )
+        if self.os_type not in ("windows", "linux"):
+            self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows' or 'linux'.")
 
     # ---------- Low-level Volatility wrapper ----------
 
@@ -174,11 +172,12 @@ class FileActivityExtractor:
     # ---------- High-level artifact extractors ----------
 
     def extract_file_objects(self) -> Any:
-        """
-        Extract file objects in memory using windows.filescan.FileScan.
-        Shows all FILE_OBJECT structures in memory.
-        """
-        logger.info("Extracting file objects...")
+        if self.os_type == "linux":
+            self.result.registry_activity = {}
+            self.result.prefetch_data = []
+        else:
+            self.result.registry_activity = self.extract_registry_activity()
+            self.result.prefetch_data = self.extract_prefetch()
         plugin = "windows.filescan.FileScan"
         data = self._run_volatility(plugin)
         if data is None:
@@ -192,9 +191,13 @@ class FileActivityExtractor:
         This shows which processes have open file handles.
         """
         logger.info("Extracting file handles...")
-        plugin = "windows.handles.Handles"
-        # Filter for File type handles
-        data = self._run_volatility(plugin, plugin_args=["--pid", "4"])  # System process often has many handles
+        if self.os_type == "linux":
+            # lsof already shows open files per process
+            return self.extract_file_objects()  # reuse
+        else:
+            plugin = "windows.handles.Handles"
+            # Filter for File type handles
+            data = self._run_volatility(plugin, plugin_args=["--pid", "4"])  # System process often has many handles
         if data is None:
             self.result.warnings.append("File handle extraction failed.")
             return []
@@ -236,19 +239,29 @@ class FileActivityExtractor:
         
         return registry_data
 
+    def extract_bash_history(self) -> Any:
+        if self.os_type != "linux":
+            return []
+        plugin = "linux.bash.Bash"
+        data = self._run_volatility(plugin)
+        return data or []
+
     def extract_recent_files(self) -> Any:
         """
         Extract recent files from registry and other sources.
         Uses windows.registry.printkey.PrintKey to find RecentDocs.
         """
         logger.info("Extracting recent files...")
-        # Try to extract RecentDocs from registry
-        plugin = "windows.registry.printkey.PrintKey"
-        # Common path for recent documents
-        recent_docs = self._run_volatility(
-            plugin,
-            plugin_args=["--key", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs"]
-        )
+        if self.os_type == "linux":
+            return self.extract_bash_history()
+        else:
+            # Try to extract RecentDocs from registry
+            plugin = "windows.registry.printkey.PrintKey"
+            # Common path for recent documents
+            recent_docs = self._run_volatility(
+                plugin,
+                plugin_args=["--key", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs"]
+            )
         if recent_docs is None:
             self.result.warnings.append("Recent files extraction failed.")
             return []

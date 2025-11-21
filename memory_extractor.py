@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#memory_extractor.py
 import json
 import logging
 import subprocess
@@ -68,11 +69,8 @@ class MemoryArtifactExtractor:
                 f"Place vol.py in the same folder or pass --vol-path."
             )
 
-        if self.os_type != "windows":
-            self.result.warnings.append(
-                f"OS type '{self.os_type}' not fully supported yet. "
-                "Defaulting to Windows plugins."
-            )
+        if self.os_type not in ("windows", "linux"):
+            self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows' or 'linux'.")
 
     # ---------- Low-level Volatility wrapper ----------
 
@@ -163,26 +161,93 @@ class MemoryArtifactExtractor:
     # ---------- High-level artifact extractors ----------
 
     def extract_processes(self) -> Any:
-        """
-        Extract process information using Volatility 3 (windows.pslist.PsList).
-        """
-        plugin = "windows.pslist.PsList"
-        data = self._run_volatility(plugin)
-        if data is None:
-            self.result.warnings.append("Process extraction failed.")
-            return []
-        return data
+        if self.os_type == "linux":
+            plugin = "linux.pslist.PsList"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Process extraction failed.")
+                return []
+            # Normalize to Windows-like schema
+            normalized = []
+            entries = data.get("entries", []) if isinstance(data, dict) else data
+            for p in entries:
+                if not isinstance(p, dict):
+                    continue
+                normalized.append({
+                    "PID": p.get("pid"),
+                    "ImageFileName": p.get("comm", ""),
+                    "PPID": p.get("ppid"),
+                    "ImagePath": "",  # Not available in pslist
+                    "CommandLine": "",  # Not available here
+                    "Threads": p.get("num_threads", 0),
+                    "Wow64": False,
+                    "SessionId": None,
+                })
+            return normalized
+        else:
+            plugin = "windows.pslist.PsList"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Process extraction failed.")
+                return []
+            return data
 
     def extract_connections(self) -> Any:
-        """
-        Extract network connection/socket information (windows.netscan.NetScan).
-        """
-        plugin = "windows.netscan.NetScan"
-        data = self._run_volatility(plugin)
-        if data is None:
-            self.result.warnings.append("Network connection extraction failed.")
-            return []
-        return data
+        if self.os_type == "linux":
+            plugin = "linux.sockstat.Sockstat"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Network connection extraction failed.")
+                return []
+
+            normalized = []
+            entries = data.get("entries", []) if isinstance(data, dict) else data
+
+            for sock in entries:
+                if not isinstance(sock, dict):
+                    continue
+
+                # Extract key fields (sockstat gives per-socket stats)
+                protocol = sock.get("protocol", "").upper()
+                family = sock.get("family", "").upper()
+                state = sock.get("state", "")
+                local_addr = sock.get("local_address", "")
+                local_port = sock.get("local_port")
+                remote_addr = sock.get("remote_address", "")
+                remote_port = sock.get("remote_port")
+
+                # Normalize protocol name (e.g., "INET" → "TCP"/"UDP")
+                # Note: sockstat doesn't distinguish TCP/UDP directly; you may need linux.netstat if available
+                # For now, assume INET = TCP (common heuristic)
+                if family == "AF_INET":
+                    proto = "TCP" if state else "UDP"
+                elif family == "AF_INET6":
+                    proto = "TCP6" if state else "UDP6"
+                else:
+                    proto = "UNKNOWN"
+
+                normalized.append({
+                    "Proto": proto,
+                    "LocalAddr": str(local_addr) if local_addr else "0.0.0.0",
+                    "LocalPort": local_port if local_port is not None else 0,
+                    "ForeignAddr": str(remote_addr) if remote_addr else "0.0.0.0",
+                    "ForeignPort": remote_port if remote_port is not None else 0,
+                    "State": state if state else ("ESTABLISHED" if remote_addr else "LISTENING"),
+                    # Add dummy fields for compatibility
+                    "PID": sock.get("pid", 0),
+                    "Owner": sock.get("process", ""),
+                })
+
+            return normalized
+
+        else:
+            # Windows path
+            plugin = "windows.netscan.NetScan"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Network connection extraction failed.")
+                return []
+            return data
 
     # ---------- Orchestrator ----------
 
