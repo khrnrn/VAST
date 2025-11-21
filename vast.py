@@ -120,7 +120,7 @@ def main():
         [
             sys.executable, "parser.py", str(input_path), 
             "--session", str(session_dir)],
-        "Step 1/5: Parsing VM snapshot"
+        "Step 1/6: Parsing VM snapshot"
     ):
         return 1
     
@@ -139,7 +139,7 @@ def main():
                 "--os", args.os,
                 "--session", str(session_dir)
             ],
-        "Step 2/5: Extracting memory artifacts (processes, network)"
+        "Step 2/6: Extracting memory artifacts (processes, network)"
     ):
         return 1
     
@@ -158,7 +158,7 @@ def main():
                 "--os", args.os,
                 "--session", str(session_dir)
             ],
-        "Step 3/5: Extracting file/activity artifacts"
+        "Step 3/6: Extracting file/activity artifacts"
     ):
         return 1
     
@@ -188,7 +188,7 @@ def main():
         
         if run_command(
             enhance_cmd,
-            "Step 4a/5: Enhancing memory artifacts with threat intelligence"
+            "Step 4a/6: Enhancing memory artifacts with threat intelligence"
         ):
             memory_enhanced = get_latest_file(f"{session_dir}/enhanced/*_memory_enriched.json")
         else:
@@ -208,7 +208,7 @@ def main():
         
         if run_command(
             enhance_cmd,
-            "Step 4b/5: Enhancing file artifacts with threat intelligence"
+            "Step 4b/6: Enhancing file artifacts with threat intelligence"
         ):
             file_enhanced = get_latest_file(f"{session_dir}/enhanced/*_file_activity_enriched.json")
         else:
@@ -216,7 +216,7 @@ def main():
     
     # Step 5: Generate combined report
     print("\n" + "="*60)
-    print("[VAST] Step 5/5: Generating combined report")
+    print("[VAST] Step 5/6: Generating combined report")
     print("="*60)
     
     # Combine all artifacts into final report
@@ -278,7 +278,28 @@ def main():
         json.dump(report, f, indent=2)
     
     print(f"SUCCESS: Final report written to: {output_path}\n")
-    
+
+    # Step 6: Automated Deep Analysis
+    print("\n" + "="*60)
+    print("[VAST] Step 6/6: Automated Deep Forensic Analysis")
+    print("="*60)
+
+    automated_cmd = [
+        sys.executable, "automated_analysis.py",
+        str(raw_file),
+        str(memory_enhanced if memory_enhanced else memory_json),
+        str(file_enhanced if file_enhanced else file_json),
+        "--session", str(session_dir)
+    ]
+
+    if not run_command(
+        automated_cmd,
+        "Step 6/6: Automated Deep Analysis"
+    ):
+        print("WARNING: Automated analysis failed, continuing...\n")
+    else:
+        print("Automated analysis completed successfully.\n")
+
     # Print summary
     print("\n" + "="*60)
     print("VAST EXTRACTION SUMMARY")
