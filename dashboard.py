@@ -18,72 +18,47 @@ try:
     BACKEND_AVAILABLE = True
 except ImportError:
     BACKEND_AVAILABLE = False
-    st.warning("⚠️ VAST backend not configured. Place all files in same directory.")
 
 # Page config
 st.set_page_config(
     page_title="VAST - Volatile Artifact Snapshot Triage",
     page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #e74c3c;
-    }
-    .timeline-container {
-        background: linear-gradient(90deg, #2c3e50 0%, #34495e 100%);
-        padding: 30px;
-        border-radius: 10px;
-        margin: 20px 0;
-    }
-    .timeline-event {
-        display: inline-block;
-        margin: 0 10px;
-        text-align: center;
-    }
-    .timeline-marker {
-        width: 60px;
-        height: 60px;
-        border-radius: 50%;
-        margin: 0 auto 10px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 24px;
-        color: white;
-    }
-    .process-marker { background-color: #3498db; }
-    .network-marker { background-color: #e74c3c; }
-    .file-marker { background-color: #2ecc71; }
-</style>
-""", unsafe_allow_html=True)
-
 # Title
-st.markdown('<p class="main-header">🔍 VAST - Volatile Artifact Snapshot Triage</p>', unsafe_allow_html=True)
+st.markdown("# 🔍 VAST - Volatile Artifact Snapshot Triage")
 st.markdown("**Digital Forensics Project - Memory Analysis Tool**")
 st.markdown("---")
 
 # Initialize session state
 if 'analysis_complete' not in st.session_state:
     st.session_state.analysis_complete = False
-if 'uploaded_file' not in st.session_state:
-    st.session_state.uploaded_file = None
-if 'os_type' not in st.session_state:
-    st.session_state.os_type = None
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
-if 'backend_results' not in st.session_state:
-    st.session_state.backend_results = None
 if 'session_dir' not in st.session_state:
     st.session_state.session_dir = None
 if 'search_query' not in st.session_state:
     st.session_state.search_query = ""
+
+# Helper function
+def generate_json_report(results):
+    """Generate JSON report"""
+    report = {
+        'metadata': {
+            'date': datetime.now().isoformat(),
+            'tool': 'VAST v1.0',
+            'os': st.session_state.get('os_type', 'Unknown'),
+            'session': st.session_state.get('session_dir', 'N/A')
+        },
+        'summary': results.get('summary', {}),
+        'artifacts': {
+            'processes': results.get('processes', []),
+            'connections': results.get('connections', []),
+            'files': results.get('file_objects', [])
+        }
+    }
+    return json.dumps(report, indent=2)
 
 # Tabs
 tab1, tab2 = st.tabs(["📤 Upload Snapshot", "📊 Timeline & Analysis"])
@@ -108,10 +83,8 @@ with tab1:
             
             if file_size_mb > 4096:
                 st.error(f"⚠️ File too large: {file_size_gb:.2f} GB. Maximum is 4GB.")
-                st.session_state.uploaded_file = None
             else:
                 st.success(f"✅ File uploaded: {uploaded_file.name}")
-                st.session_state.uploaded_file = uploaded_file
                 
                 if file_size_mb < 1024:
                     st.info(f"**File Size:** {file_size_mb:.2f} MB")
@@ -123,11 +96,7 @@ with tab1:
     
     with col2:
         st.subheader("2. Select Guest OS")
-        os_type = st.selectbox(
-            "Choose the operating system",
-            ["Windows", "Linux", "macOS"]
-        )
-        st.session_state.os_type = os_type
+        os_type = st.selectbox("Choose the operating system", ["Windows", "Linux", "macOS"])
     
     st.markdown("---")
     st.subheader("3. Analysis Options")
@@ -155,7 +124,7 @@ with tab1:
             if uploaded_file is None:
                 st.error("⚠️ Please upload a snapshot file first!")
             elif not BACKEND_AVAILABLE:
-                st.error("⚠️ VAST backend not configured. Ensure all scripts are in the same directory.")
+                st.error("⚠️ VAST backend not configured.")
             elif uploaded_file.size > (4096 * 1024 * 1024):
                 st.error("⚠️ File exceeds 4GB limit.")
             else:
@@ -188,13 +157,12 @@ with tab1:
                             progress_callback=update_progress
                         )
                         
-                        st.session_state.backend_results = backend_results
-                        
                         if backend_results.get("success") and backend_results.get("session_dir"):
                             analyzer = VASTAnalyzer()
                             display_results = analyzer.load_results(Path(backend_results["session_dir"]))
                             st.session_state.analysis_results = display_results
                             st.session_state.session_dir = backend_results["session_dir"]
+                            st.session_state.os_type = os_type
                             st.session_state.analysis_complete = True
                         
                         status_text.empty()
@@ -204,15 +172,8 @@ with tab1:
                             st.success("✅ Analysis completed successfully!")
                             st.info("👉 Go to 'Timeline & Analysis' tab to view results")
                             st.balloons()
-                            
-                            if backend_results.get("warnings"):
-                                with st.expander("⚠️ Warnings"):
-                                    for warning in backend_results["warnings"]:
-                                        st.warning(warning)
                         else:
-                            st.error("❌ Analysis failed:")
-                            for error in backend_results.get("errors", ["Unknown error"]):
-                                st.error(error)
+                            st.error("❌ Analysis failed")
                 
                 except Exception as e:
                     st.error(f"❌ Analysis failed: {str(e)}")
@@ -224,28 +185,34 @@ with tab1:
     
     with col_btn2:
         if st.button("🗑️ Clear", use_container_width=True):
-            st.session_state.uploaded_file = None
-            st.session_state.analysis_results = None
             st.session_state.analysis_complete = False
+            st.session_state.analysis_results = None
             st.rerun()
 
-# Tab 2: Timeline & Analysis
+# Tab 2: Timeline & Analysis - ONLY SHOW IF ANALYSIS COMPLETE
 with tab2:
-    st.header("Timeline of Events & Forensic Analysis")
-    
-    # Only show content if analysis is complete
-    if not st.session_state.analysis_complete or st.session_state.analysis_results is None:
-        st.info("👈 Please upload and analyze a snapshot file in the 'Upload Snapshot' tab first.")
-        st.markdown("### What you'll see here:")
-        st.markdown("- 🕒 **Horizontal Timeline** - Visual event sequence")
-        st.markdown("- 🔍 **Global Search** - Find any artifact instantly")  
-        st.markdown("- 📊 **Charts & Graphs** - Statistical analysis")
-        st.markdown("- ⚠️ **Threat Detection** - Suspicious artifacts highlighted")
-        st.markdown("- 💾 **Export Options** - CSV and JSON downloads")
+    if not st.session_state.analysis_complete:
+        # Show placeholder BEFORE analysis
+        st.info("👈 **Please complete analysis in the 'Upload Snapshot' tab first**")
+        st.markdown("---")
+        st.markdown("### 📊 What You'll See After Analysis:")
+        st.markdown("""
+        - **🕒 Interactive Timeline** - Visual event sequence showing processes, network, and files
+        - **🔍 Global Search** - Instantly find any artifact across all data
+        - **📈 Statistical Charts** - Distribution graphs and suspicious event detection
+        - **⚠️ Threat Analysis** - Automatically highlighted suspicious processes and connections
+        - **💾 Export Options** - Download results as CSV or JSON for further analysis
+        """)
+        st.markdown("---")
+        st.info("💡 **Tip:** Analysis typically takes 5-15 minutes depending on snapshot size")
+        
     else:
+        # ONLY SHOW AFTER ANALYSIS COMPLETE
         results = st.session_state.analysis_results
         
-        # **GLOBAL SEARCH BAR**
+        st.header("Timeline of Events & Forensic Analysis")
+        
+        # Search bar
         st.subheader("🔍 Search Artifacts")
         search_col1, search_col2 = st.columns([4, 1])
         
@@ -253,201 +220,188 @@ with tab2:
             search_query = st.text_input(
                 "",
                 value=st.session_state.search_query,
-                placeholder="Search processes, IPs, files, ports, PIDs...",
+                placeholder="Search processes, IPs, files, ports...",
                 key="global_search",
                 label_visibility="collapsed"
             )
             st.session_state.search_query = search_query
         
         with search_col2:
-            if st.button("Clear Search", use_container_width=True):
+            if st.button("Clear", use_container_width=True):
                 st.session_state.search_query = ""
                 st.rerun()
         
-        if st.session_state.session_dir:
-            with st.expander("📁 Session Directory"):
-                st.code(f"{st.session_state.session_dir}")
-        
         st.markdown("---")
         
-        # Summary metrics
-        st.subheader("📈 Analysis Summary")
-        
+        # Summary
+        st.subheader("📈 Summary")
         summary = results.get("summary", {})
         col1, col2, col3, col4 = st.columns(4)
         
-        total_processes = summary.get("total_processes", len(results.get('processes', [])))
-        total_connections = summary.get("total_connections", len(results.get('connections', [])))
-        total_files = summary.get("total_file_objects", len(results.get('file_objects', [])))
-        total_artifacts = total_processes + total_connections + total_files
+        total_processes = len(results.get('processes', []))
+        total_connections = len(results.get('connections', []))
+        total_files = len(results.get('file_objects', []))
         
-        with col1:
-            st.metric("Processes", total_processes)
-        with col2:
-            st.metric("Network", total_connections)
-        with col3:
-            st.metric("Files", total_files)
-        with col4:
-            st.metric("Total Artifacts", total_artifacts)
+        col1.metric("Processes", total_processes)
+        col2.metric("Network", total_connections)
+        col3.metric("Files", total_files)
+        col4.metric("Total", total_processes + total_connections + total_files)
         
         st.markdown("---")
         
-        # **HORIZONTAL TIMELINE**
+        # IMPROVED TIMELINE
         st.subheader("🕒 Events Timeline")
         
-        # Build timeline data
-        timeline_events = []
-        event_colors = []
-        event_types = []
-        event_names = []
-        event_details = []
+        # Prepare timeline data
+        timeline_data = []
         
-        # Add process events
-        for i, proc in enumerate(results.get("processes", [])[:50]):  # Limit for performance
-            timestamp = i  # Use sequence number as x-axis
+        # Processes
+        for i, proc in enumerate(results.get("processes", [])[:50]):
             name = str(proc.get("ImageFileName") or proc.get("comm") or "Unknown")
-            pid = proc.get("PID") or proc.get("pid", "N/A")
-            
-            timeline_events.append(timestamp)
-            event_colors.append('#3498db')  # Blue for processes
-            event_types.append('Process')
-            event_names.append(name)
-            event_details.append(f"PID: {pid}")
+            timeline_data.append({
+                'sequence': i,
+                'type': 'Process',
+                'name': name[:30],
+                'color': '#3498db',
+                'icon': '⚙️',
+                'details': f"PID: {proc.get('PID') or proc.get('pid', 'N/A')}"
+            })
         
-        # Add network events
+        # Network
+        offset = len(timeline_data)
         for i, conn in enumerate(results.get("connections", [])[:50]):
-            timestamp = len(timeline_events) + i
-            name = f"{conn.get('ForeignAddr', 'Unknown')}"
-            
-            timeline_events.append(timestamp)
-            event_colors.append('#e74c3c')  # Red for network
-            event_types.append('Network')
-            event_names.append(name)
-            event_details.append(f"{conn.get('Proto', 'TCP')} {conn.get('State', '')}")
+            addr = conn.get('ForeignAddr', 'Unknown')
+            timeline_data.append({
+                'sequence': offset + i,
+                'type': 'Network',
+                'name': addr[:30],
+                'color': '#e74c3c',
+                'icon': '🌐',
+                'details': f"{conn.get('Proto', 'TCP')} - {conn.get('State', '')}"
+            })
         
-        # Add file events
+        # Files
+        offset = len(timeline_data)
         for i, file_obj in enumerate(results.get("file_objects", [])[:30]):
-            timestamp = len(timeline_events) + i
-            name = str(file_obj.get("FileName") or "Unknown")[:30]
-            
-            timeline_events.append(timestamp)
-            event_colors.append('#2ecc71')  # Green for files
-            event_types.append('File')
-            event_names.append(name)
-            event_details.append("")
+            name = str(file_obj.get("FileName") or "Unknown")
+            timeline_data.append({
+                'sequence': offset + i,
+                'type': 'File',
+                'name': name[:30],
+                'color': '#2ecc71',
+                'icon': '📁',
+                'details': ''
+            })
         
-        if timeline_events:
-            # Apply search filter
-            if search_query:
-                filtered_indices = [
-                    i for i in range(len(timeline_events))
-                    if search_query.lower() in event_names[i].lower() or
-                       search_query.lower() in event_details[i].lower() or
-                       search_query.lower() in event_types[i].lower()
-                ]
-                
-                if filtered_indices:
-                    timeline_events = [timeline_events[i] for i in filtered_indices]
-                    event_colors = [event_colors[i] for i in filtered_indices]
-                    event_types = [event_types[i] for i in filtered_indices]
-                    event_names = [event_names[i] for i in filtered_indices]
-                    event_details = [event_details[i] for i in filtered_indices]
-                    
-                    st.info(f"🔍 {len(filtered_indices)} events match '{search_query}'")
-                else:
-                    st.warning(f"No events match '{search_query}'")
-                    timeline_events = []
+        if timeline_data:
+            df = pd.DataFrame(timeline_data)
             
-            if timeline_events:
-                # Create horizontal timeline
+            # Filter by search
+            if search_query:
+                mask = df.apply(lambda row: search_query.lower() in str(row).lower(), axis=1)
+                df = df[mask]
+                if len(df) > 0:
+                    st.info(f"🔍 Found {len(df)} events matching '{search_query}'")
+                else:
+                    st.warning(f"No matches for '{search_query}'")
+            
+            if len(df) > 0:
+                # Create arrow-style timeline
                 fig = go.Figure()
                 
-                # Add trace for each event type
-                for event_type, color in [('Process', '#3498db'), ('Network', '#e74c3c'), ('File', '#2ecc71')]:
-                    indices = [i for i, t in enumerate(event_types) if t == event_type]
-                    if indices:
+                for event_type in ['Process', 'Network', 'File']:
+                    df_type = df[df['type'] == event_type]
+                    if len(df_type) > 0:
                         fig.add_trace(go.Scatter(
-                            x=[timeline_events[i] for i in indices],
-                            y=[1] * len(indices),  # All on same horizontal line
+                            x=df_type['sequence'],
+                            y=[1] * len(df_type),
                             mode='markers+text',
-                            name=event_type,
+                            name=f"{df_type.iloc[0]['icon']} {event_type}",
                             marker=dict(
-                                size=15,
-                                color=color,
+                                size=20,
+                                color=df_type.iloc[0]['color'],
                                 line=dict(width=2, color='white'),
                                 symbol='circle'
                             ),
-                            text=[event_names[i][:15] for i in indices],
+                            text=df_type['name'],
                             textposition='top center',
-                            textfont=dict(size=9),
-                            customdata=[[event_names[i], event_details[i]] for i in indices],
+                            textfont=dict(size=8),
+                            customdata=df_type[['name', 'details']],
                             hovertemplate='<b>%{customdata[0]}</b><br>%{customdata[1]}<extra></extra>'
                         ))
                 
-                # Add horizontal line
-                fig.add_shape(
-                    type="line",
-                    x0=0, x1=max(timeline_events),
-                    y0=1, y1=1,
-                    line=dict(color="#95a5a6", width=3)
-                )
+                # Timeline arrow
+                if len(df) > 1:
+                    fig.add_annotation(
+                        x=max(df['sequence']),
+                        y=1,
+                        ax=0,
+                        ay=1,
+                        xref='x',
+                        yref='y',
+                        axref='x',
+                        ayref='y',
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowsize=1.5,
+                        arrowwidth=3,
+                        arrowcolor='#95a5a6'
+                    )
                 
                 fig.update_layout(
-                    title="Event Sequence Timeline",
+                    title="Event Sequence Timeline (Hover for details)",
                     xaxis=dict(
-                        title="Event Sequence →",
-                        showgrid=False,
-                        zeroline=False,
-                        range=[-2, max(timeline_events) + 2]
+                        title="← Earlier Events | Event Sequence | Later Events →",
+                        showgrid=True,
+                        gridcolor='#2c3e50',
+                        zeroline=False
                     ),
                     yaxis=dict(
                         showticklabels=False,
                         showgrid=False,
                         zeroline=False,
-                        range=[0.5, 1.5]
+                        range=[0.7, 1.3]
                     ),
-                    height=300,
+                    height=350,
                     showlegend=True,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
                     template='plotly_dark',
-                    hovermode='closest'
+                    hovermode='closest',
+                    plot_bgcolor='#1e1e1e',
+                    paper_bgcolor='#0e1117'
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Bar charts
-                col_chart1, col_chart2 = st.columns(2)
+                # Stats
+                col_c1, col_c2 = st.columns(2)
                 
-                with col_chart1:
-                    event_count_df = pd.DataFrame({'Type': event_types}).value_counts().reset_index()
-                    event_count_df.columns = ['Type', 'Count']
-                    
+                with col_c1:
+                    counts = df['type'].value_counts()
                     fig_bar = px.bar(
-                        event_count_df,
-                        x='Type',
-                        y='Count',
+                        x=counts.index, y=counts.values,
                         title='Events by Type',
-                        color='Type',
+                        labels={'x': 'Type', 'y': 'Count'},
+                        color=counts.index,
                         color_discrete_map={'Process': '#3498db', 'Network': '#e74c3c', 'File': '#2ecc71'}
                     )
-                    fig_bar.update_layout(showlegend=False, template='plotly_dark', height=250)
+                    fig_bar.update_layout(showlegend=False, template='plotly_dark', height=300)
                     st.plotly_chart(fig_bar, use_container_width=True)
                 
-                with col_chart2:
-                    # Suspicious events if available
-                    processes_df = pd.DataFrame(results.get("processes", []))
-                    if "suspicious_score" in processes_df.columns:
-                        susp_df = processes_df[processes_df["suspicious_score"] > 0]
-                        if not susp_df.empty:
-                            st.metric("⚠️ Suspicious Processes", len(susp_df))
+                with col_c2:
+                    procs_df = pd.DataFrame(results.get("processes", []))
+                    if "suspicious_score" in procs_df.columns and not procs_df.empty:
+                        susp_count = len(procs_df[procs_df["suspicious_score"] > 0])
+                        norm_count = len(procs_df) - susp_count
+                        if susp_count > 0:
                             fig_susp = px.bar(
-                                x=['Suspicious', 'Normal'],
-                                y=[len(susp_df), len(processes_df) - len(susp_df)],
+                                x=['⚠️ Suspicious', '✅ Normal'],
+                                y=[susp_count, norm_count],
                                 title='Process Analysis',
                                 color=['Suspicious', 'Normal'],
                                 color_discrete_map={'Suspicious': '#e74c3c', 'Normal': '#2ecc71'}
                             )
-                            fig_susp.update_layout(showlegend=False, template='plotly_dark', height=250)
+                            fig_susp.update_layout(showlegend=False, template='plotly_dark', height=300)
                             st.plotly_chart(fig_susp, use_container_width=True)
                         else:
                             st.success("✅ No suspicious processes detected")
@@ -456,163 +410,115 @@ with tab2:
         
         st.markdown("---")
         
-        # **PROCESSES**
+        # PROCESSES
         if results.get("processes"):
             st.subheader("💻 Process Analysis")
-            
-            processes_df = pd.DataFrame(results["processes"])
+            procs_df = pd.DataFrame(results["processes"])
             
             if search_query:
-                mask = processes_df.apply(lambda row: search_query.lower() in str(row).lower(), axis=1)
-                filtered_processes = processes_df[mask]
-            else:
-                filtered_processes = processes_df
+                mask = procs_df.apply(lambda row: search_query.lower() in str(row).lower(), axis=1)
+                procs_df = procs_df[mask]
             
-            col_p1, col_p2, col_p3 = st.columns(3)
+            # Remove __children column if it exists
+            if '__children' in procs_df.columns:
+                procs_df = procs_df.drop(columns=['__children'])
             
-            with col_p1:
-                st.metric("Total Processes", len(filtered_processes))
-            with col_p2:
-                if "suspicious_score" in filtered_processes.columns:
-                    susp = filtered_processes[filtered_processes["suspicious_score"] > 0]
-                    st.metric("Suspicious", len(susp))
-            with col_p3:
-                if "Wow64" in filtered_processes.columns:
-                    wow = filtered_processes[filtered_processes["Wow64"] == True]
-                    st.metric("WoW64", len(wow))
+            col_p1, col_p2 = st.columns(2)
+            col_p1.metric("Total Processes", len(procs_df))
             
-            if "suspicious_score" in filtered_processes.columns:
-                susp_procs = filtered_processes[filtered_processes["suspicious_score"] > 0]
-                if not susp_procs.empty:
-                    with st.expander(f"⚠️ Suspicious Processes ({len(susp_procs)})", expanded=True):
-                        st.dataframe(susp_procs.sort_values("suspicious_score", ascending=False), height=250)
+            if "suspicious_score" in procs_df.columns:
+                susp = procs_df[procs_df["suspicious_score"] > 0]
+                col_p2.metric("⚠️ Suspicious", len(susp))
+                
+                if not susp.empty:
+                    with st.expander(f"⚠️ Suspicious Processes ({len(susp)})", expanded=True):
+                        st.dataframe(susp.sort_values("suspicious_score", ascending=False), height=250)
             
             with st.expander("📋 All Processes"):
-                st.dataframe(filtered_processes, use_container_width=True, height=400)
-                csv = filtered_processes.to_csv(index=False)
+                st.dataframe(procs_df, use_container_width=True, height=400)
+                csv = procs_df.to_csv(index=False)
                 st.download_button("📥 Download CSV", csv, "processes.csv", "text/csv")
         
         st.markdown("---")
         
-        # **NETWORK**
+        # NETWORK
         if results.get("connections"):
             st.subheader("🌐 Network Analysis")
-            
-            connections_df = pd.DataFrame(results["connections"])
+            conns_df = pd.DataFrame(results["connections"])
             
             if search_query:
-                mask = connections_df.apply(lambda row: search_query.lower() in str(row).lower(), axis=1)
-                filtered_conns = connections_df[mask]
-            else:
-                filtered_conns = connections_df
+                mask = conns_df.apply(lambda row: search_query.lower() in str(row).lower(), axis=1)
+                conns_df = conns_df[mask]
             
-            col_n1, col_n2, col_n3, col_n4 = st.columns(4)
+            # Remove __children if exists
+            if '__children' in conns_df.columns:
+                conns_df = conns_df.drop(columns=['__children'])
             
-            with col_n1:
-                st.metric("Total", len(filtered_conns))
-            with col_n2:
-                if "State" in filtered_conns.columns:
-                    est = filtered_conns[filtered_conns["State"].str.upper() == "ESTABLISHED"]
-                    st.metric("Established", len(est))
-            with col_n3:
-                if "State" in filtered_conns.columns:
-                    listen = filtered_conns[filtered_conns["State"].str.upper() == "LISTENING"]
-                    st.metric("Listening", len(listen))
-            with col_n4:
-                if "suspicious_score" in filtered_conns.columns:
-                    susp = filtered_conns[filtered_conns["suspicious_score"] > 0]
-                    st.metric("Suspicious", len(susp))
+            col_n1, col_n2, col_n3 = st.columns(3)
+            col_n1.metric("Total", len(conns_df))
             
-            # Charts
-            if "ForeignAddr" in filtered_conns.columns:
-                col_viz1, col_viz2 = st.columns(2)
-                
-                with col_viz1:
-                    ips = filtered_conns["ForeignAddr"].value_counts().head(10)
-                    if not ips.empty:
-                        fig = px.bar(x=ips.values, y=ips.index, orientation='h', title='Top Destination IPs')
-                        fig.update_layout(template='plotly_dark', height=250)
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                with col_viz2:
-                    ports = filtered_conns["LocalPort"].value_counts().head(10)
-                    if not ports.empty:
-                        fig = px.bar(x=ports.values, y=ports.index.astype(str), orientation='h', title='Top Local Ports')
-                        fig.update_layout(template='plotly_dark', height=250)
-                        st.plotly_chart(fig, use_container_width=True)
+            if "State" in conns_df.columns:
+                est = conns_df[conns_df["State"].str.upper() == "ESTABLISHED"]
+                col_n2.metric("Established", len(est))
+                listen = conns_df[conns_df["State"].str.upper() == "LISTENING"]
+                col_n3.metric("Listening", len(listen))
             
-            if "suspicious_score" in filtered_conns.columns:
-                susp_conns = filtered_conns[filtered_conns["suspicious_score"] > 0]
-                if not susp_conns.empty:
-                    with st.expander(f"⚠️ Suspicious Connections ({len(susp_conns)})", expanded=True):
-                        st.dataframe(susp_conns.sort_values("suspicious_score", ascending=False), height=250)
+            if "suspicious_score" in conns_df.columns:
+                susp = conns_df[conns_df["suspicious_score"] > 0]
+                if not susp.empty:
+                    with st.expander(f"⚠️ Suspicious ({len(susp)})", expanded=True):
+                        st.dataframe(susp.sort_values("suspicious_score", ascending=False), height=250)
             
-            with st.expander("📋 All Network Connections"):
-                st.dataframe(filtered_conns, use_container_width=True, height=400)
-                csv = filtered_conns.to_csv(index=False)
+            with st.expander("📋 All Connections"):
+                st.dataframe(conns_df, use_container_width=True, height=400)
+                csv = conns_df.to_csv(index=False)
                 st.download_button("📥 Download CSV", csv, "connections.csv", "text/csv")
         
         st.markdown("---")
         
-        # **FILES**
+        # FILES
         if results.get("file_objects"):
             st.subheader("📁 File Analysis")
-            
             files_df = pd.DataFrame(results["file_objects"])
             
             if search_query:
                 mask = files_df.apply(lambda row: search_query.lower() in str(row).lower(), axis=1)
-                filtered_files = files_df[mask]
-            else:
-                filtered_files = files_df
+                files_df = files_df[mask]
             
-            st.metric("File Objects Found", len(filtered_files))
+            # Remove __children if exists
+            if '__children' in files_df.columns:
+                files_df = files_df.drop(columns=['__children'])
+            
+            st.metric("File Objects", len(files_df))
             
             with st.expander("📋 All File Objects"):
-                st.dataframe(filtered_files, use_container_width=True, height=400)
-                csv = filtered_files.to_csv(index=False)
+                st.dataframe(files_df, use_container_width=True, height=400)
+                csv = files_df.to_csv(index=False)
                 st.download_button("📥 Download CSV", csv, "files.csv", "text/csv")
         
         st.markdown("---")
         
-        # **EXPORT**
+        # EXPORT
         st.subheader("📄 Export Results")
-        
         col_ex1, col_ex2 = st.columns(2)
         
         with col_ex1:
-            if st.button("📥 Generate Full JSON Report", use_container_width=True):
-                report = generate_json_report(results)
-                st.download_button(
-                    "Download JSON Report",
-                    report,
-                    f"vast_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    "application/json",
-                    use_container_width=True
-                )
+            if st.button("📥 Generate JSON Report", use_container_width=True):
+                try:
+                    report = generate_json_report(results)
+                    st.download_button(
+                        "Download Report",
+                        report,
+                        f"vast_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        "application/json",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.error(f"Error generating report: {str(e)}")
         
         with col_ex2:
             if st.session_state.session_dir:
-                st.info(f"📁 Session: {Path(st.session_state.session_dir).name}")
-
-# Helper function
-def generate_json_report(results):
-    """Generate JSON report"""
-    report = {
-        'metadata': {
-            'date': datetime.now().isoformat(),
-            'tool': 'VAST v1.0',
-            'os': st.session_state.os_type if st.session_state.os_type else 'Unknown',
-            'session': st.session_state.session_dir if st.session_state.session_dir else 'N/A'
-        },
-        'summary': results.get('summary', {}),
-        'artifacts': {
-            'processes': results.get('processes', []),
-            'connections': results.get('connections', []),
-            'files': results.get('file_objects', [])
-        }
-    }
-    return json.dumps(report, indent=2)
+                st.info(f"📁 {Path(st.session_state.session_dir).name}")
 
 # Sidebar
 with st.sidebar:
@@ -622,42 +528,16 @@ with st.sidebar:
     
     st.markdown("### Features")
     st.markdown("""
-    - 📊 Horizontal timeline
+    - 📊 Interactive timeline
     - 🔍 Global search
     - 📈 Statistical charts
     - 🎯 Threat detection
-    - 💾 Multiple exports
+    - 💾 CSV/JSON export
     """)
     
     st.markdown("---")
-    st.markdown("### Analysis Options")
-    with st.expander("ℹ️ What do they mean?"):
-        st.markdown("""
-        **Extract Processes:**
-        - Running processes and their metadata
-        - Process IDs, parent relationships
-        - Command-line arguments
-        
-        **Extract Network:**
-        - Active TCP/UDP connections
-        - Listening ports and services
-        - Remote IP addresses
-        
-        **Extract File Handles:**
-        - Open file descriptors
-        - Recently accessed files
-        - File system activity
-        
-        **Extract Registry (Windows):**
-        - Registry hives in memory
-        - Recent document access
-        - User activity traces
-        """)
-    
-    st.markdown("---")
     st.markdown("**ICT3215 - Group 16**")
-    st.markdown("Singapore Institute of Technology")
+    st.markdown("SIT 2024")
     
     if st.session_state.analysis_complete:
-        st.markdown("---")
         st.success("✅ Analysis Complete")
