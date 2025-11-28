@@ -1,3 +1,4 @@
+# dashboard.py - VAST Memory Forensics Dashboard (MERGED v3.0)
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -9,40 +10,149 @@ import sys
 from pathlib import Path
 import tempfile
 
+# Add backend to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
     from vast_integration import VASTAnalyzer, run_analysis
     BACKEND_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    st.error("Backend not found. Make sure vast_integration.py is in the same folder.")
     BACKEND_AVAILABLE = False
 
+# Page config
 st.set_page_config(page_title="VAST - Memory Forensics Dashboard", page_icon="🔍", layout="wide")
 
+# Custom CSS
 st.markdown("""
 <style>
-    .stMetric { background-color: #1e1e1e; padding: 15px; border-radius: 8px; }
+    .big-font { font-size: 50px !important; font-weight: bold; }
     .info-card { 
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 12px;
-        margin: 10px 0;
-        color: white;
+        padding: 20px; border-radius: 12px; margin: 10px 0; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.3);
     }
+    .stMetric { background-color: #1e1e1e; padding: 15px; border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("# 🔍 VAST - Volatile Artifact Snapshot Triage")
-st.markdown("**Advanced Memory Forensics Dashboard with AI-Powered Threat Detection**")
+st.markdown("<div class='big-font'>🔍 VAST - Volatile Artifact Snapshot Triage</div>", unsafe_allow_html=True)
+st.markdown("**Advanced Memory Forensics Dashboard • AI-Powered Threat Detection**")
 st.markdown("---")
 
+# Initialize session state
 for key in ['analysis_complete', 'analysis_results', 'session_dir', 'search_query', 'os_type', 'snapshot_info']:
     if key not in st.session_state:
         st.session_state[key] = False if key == 'analysis_complete' else (None if key != 'search_query' else "")
 
+# ========================
+# METADATA EXTRACTION FUNCTION (FROM V2 - WORKING!)
+# ========================
+def extract_snapshot_metadata(display_results, automated_results=None):
+    """Extract metadata for Windows, Linux, and macOS"""
+    metadata = {
+        'computer_name': 'Unknown',
+        'username': 'Unknown',
+        'os_version': 'Unknown',
+        'architecture': 'Unknown',
+        'analysis_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'filename': 'N/A',
+        'size_gb': 'N/A',
+        'os_type': 'Unknown'
+    }
+
+    if not automated_results:
+        return metadata
+
+    sys_info = automated_results.get("system_info", {})
+
+    # === COMPUTER NAME ===
+    metadata['computer_name'] = sys_info.get("computer_name") or sys_info.get("hostname", "Unknown")
+
+    # === ARCHITECTURE ===
+    if sys_info.get("architecture"):
+        metadata['architecture'] = sys_info["architecture"]
+    elif "plugin_output" in sys_info:
+        is64 = next((item['Value'] for item in sys_info["plugin_output"] if item['Variable'] == 'Is64Bit'), None)
+        metadata['architecture'] = "x64" if is64 == "True" else "x86"
+    elif sys_info.get("Is64Bit") is not None:
+        metadata['architecture'] = "x64" if sys_info["Is64Bit"] else "x86"
+
+    # === USERNAME (SMART FILTERING) ===
+    usernames = []
+    if sys_info.get("usernames"):
+        usernames = sys_info["usernames"]
+    elif "plugin_output" in sys_info:
+        uname_line = next((item['Value'] for item in sys_info["plugin_output"] if "login name" in str(item.get('Variable', '')).lower()), None)
+        if uname_line:
+            usernames = [uname_line]
+
+    # Filter out system accounts
+    system_accounts = {
+        "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail", "news",
+        "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
+        "systemd-network", "systemd-resolve", "messagebus", "_apt",
+        "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE", "Administrator"
+    }
+    real_users = [u for u in usernames if not u.endswith('$') and u not in system_accounts]
+
+    if real_users:
+        metadata['username'] = real_users[0]
+    else:
+        # Fallback: parse from process paths
+        for p in display_results.get("processes", []):
+            path = str(p.get("ImagePath") or p.get("ImageFileName") or p.get("comm", "") or "")
+            path = path.lower()
+            if "/home/" in path:
+                username = path.split("/home/")[1].split("/")[0]
+                if username and username not in ["", "root"]:
+                    metadata['username'] = username
+                    break
+            elif "\\users\\" in path:
+                parts = path.split("\\users\\")
+                if len(parts) > 1:
+                    username = parts[1].split("\\")[0]
+                    if username not in ["public", "default", "all users"]:
+                        metadata['username'] = username.capitalize()
+                        break
+
+    # === OS VERSION ===
+    plugin_output = sys_info.get("plugin_output", [])
+
+    # Windows
+    if any("NtMajorVersion" in str(item.get('Variable', '')) for item in plugin_output):
+        nt_major = next((item['Value'] for item in plugin_output if item['Variable'] == 'NtMajorVersion'), '10')
+        nt_minor = next((item['Value'] for item in plugin_output if item['Variable'] == 'NtMinorVersion'), '0')
+        build = next((item['Value'].split('.')[1] for item in plugin_output if item['Variable'] == 'Major/Minor'), 'Unknown')
+        metadata['os_version'] = f"Windows {nt_major}.{nt_minor} (Build {build})"
+        metadata['os_type'] = "Windows"
+
+    # Linux
+    elif any("Linux version" in str(item.get('Value', '')) for item in plugin_output):
+        version_line = next((item['Value'] for item in plugin_output if "Linux version" in str(item.get('Value', ''))), "")
+        if version_line:
+            metadata['os_version'] = version_line.split(" ")[2] if len(version_line.split()) > 2 else version_line
+        else:
+            os_release = next((item['Value'] for item in plugin_output if "PRETTY_NAME" in str(item.get('Value', ''))), "")
+            metadata['os_version'] = os_release.strip('"')
+        metadata['os_type'] = "Linux"
+
+    # macOS
+    elif any("Darwin Kernel" in str(item.get('Value', '')) for item in plugin_output):
+        kernel_line = next((item['Value'] for item in plugin_output if "Darwin Kernel" in str(item.get('Value', ''))), "")
+        metadata['os_version'] = kernel_line.strip()
+        metadata['os_type'] = "macOS"
+
+    # Fallback
+    if metadata['os_version'] == 'Unknown':
+        summary = display_results.get("summary", {})
+        if summary.get("os_version"):
+            metadata['os_version'] = summary["os_version"]
+
+    return metadata
+
 def generate_json_report(results):
     return json.dumps({
-        'metadata': {'date': datetime.now().isoformat(), 'tool': 'VAST v2.0', 
+        'metadata': {'date': datetime.now().isoformat(), 'tool': 'VAST v3.0', 
                     'os': st.session_state.get('os_type', 'Unknown'),
                     'session': st.session_state.get('session_dir', 'N/A'),
                     'snapshot_info': st.session_state.get('snapshot_info', {})},
@@ -52,89 +162,49 @@ def generate_json_report(results):
                      'files': results.get('file_objects', [])}
     }, indent=2)
 
-def extract_snapshot_metadata(results):
-    """Extract device information from analysis results"""
-    metadata = {
-        'computer_name': 'Unknown',
-        'username': 'Unknown',
-        'os_version': 'Unknown',
-        'architecture': 'Unknown',
-        'analysis_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    
-    # Try to extract from processes
-    procs = results.get('processes', [])
-    if procs:
-        # Look for system processes that might have computer name
-        for proc in procs:
-            # Windows: Look for ImageFileName patterns
-            if 'ImageFileName' in proc:
-                img = str(proc['ImageFileName'])
-                if '\\Users\\' in img:
-                    parts = img.split('\\Users\\')
-                    if len(parts) > 1:
-                        username = parts[1].split('\\')[0]
-                        if username and username != 'Unknown':
-                            metadata['username'] = username
-                            break
-            # Linux: Look for comm patterns
-            elif 'comm' in proc:
-                comm = str(proc['comm'])
-                if comm:
-                    # Try to get username from process info
-                    pass
-    
-    # Try to get OS version from summary
-    summary = results.get('summary', {})
-    if summary:
-        if 'os_version' in summary:
-            metadata['os_version'] = summary['os_version']
-        if 'computer_name' in summary:
-            metadata['computer_name'] = summary['computer_name']
-    
-    return metadata
-
+# ========================
+# TABS
+# ========================
 tab1, tab2, tab3 = st.tabs(["📤 Upload Snapshot", "📊 Timeline & Analysis", "📈 Advanced Analytics"])
 
 with tab1:
     st.header("Upload VM Snapshot")
-    
+
     col1, col2 = st.columns([2, 1])
-    
     with col1:
-        st.subheader("1. Snapshot File")
-        uploaded_file = st.file_uploader("Choose VM snapshot", type=['vmsn', 'vmem', 'sav'],
-            help="VMware (.vmsn, .vmem) or VirtualBox (.sav) - Max 100GB")
-        
+        uploaded_file = st.file_uploader(
+            "Choose snapshot file",
+            type=['vmem', 'vmsn', 'sav', 'raw', 'gz'],
+            help="Supports VMware (.vmem/.vmsn), VirtualBox (.sav), Raw (.raw), Compressed (.gz) - Max 100GB"
+        )
+
         if uploaded_file:
-            size_mb = uploaded_file.size / (1024 * 1024)
-            size_gb = size_mb / 1024
-            
+            size_gb = uploaded_file.size / (1024**3)
+            size_str = f"{size_gb:.2f} GB" if size_gb >= 1 else f"{uploaded_file.size / (1024**2):.1f} MB"
+
             if size_gb > 100:
-                st.error(f"⚠️ File too large: {size_gb:.2f} GB (Max: 100GB)")
+                st.error(f"⚠️ File too large: {size_str} (Max: 100GB)")
             else:
                 st.success(f"✅ {uploaded_file.name}")
-                st.info(f"📦 Size: {size_gb:.2f} GB" if size_mb >= 1024 else f"📦 Size: {size_mb:.2f} MB")
-                if size_gb > 50:
-                    st.warning(f"⏱️ Very large file - Analysis may take 45-90 minutes")
-                elif size_gb > 10:
-                    st.warning(f"⏱️ Large file - Analysis may take 20-45 minutes")
-    
+                st.info(f"📦 Size: {size_str}")
+                
+                if size_gb > 5:
+                    st.warning(f"⚠️ Large file! If upload fails:")
+                    st.code("# Compress first:\ngzip your_snapshot.raw", language="bash")
+
     with col2:
-        st.subheader("2. Guest OS")
-        os_type = st.selectbox("Operating System", ["Windows", "Linux", "macOS"])
-    
+        os_type = st.selectbox("Guest OS", ["Windows", "Linux", "macOS"], index=0)
+
     st.markdown("---")
     st.subheader("3. Analysis Options")
-    
-    col3, col4 = st.columns(2)
-    with col3:
+    c1, c2 = st.columns(2)
+    with c1:
         extract_processes = st.checkbox("✓ Extract Processes", True, help="Running processes & metadata")
         extract_network = st.checkbox("✓ Extract Network", True, help="Active connections & ports")
-    with col4:
+    with c2:
         extract_files = st.checkbox("✓ Extract Files", True, help="Open file handles")
-        extract_registry = st.checkbox("✓ Registry (Windows)", os_type=="Windows", help="Registry activity")
-    
+        extract_registry = st.checkbox("✓ Registry (Windows)", os_type == "Windows", help="Registry activity")
+
     st.markdown("---")
     
     col_btn1, col_btn2, _ = st.columns([1, 1, 2])
@@ -172,8 +242,15 @@ with tab1:
                             analyzer = VASTAnalyzer()
                             display_results = analyzer.load_results(Path(results["session_dir"]))
                             
-                            # Extract metadata
-                            snapshot_metadata = extract_snapshot_metadata(display_results)
+                            # Load automated results for metadata
+                            automated_path = Path(results["session_dir"]) / "automated" / "automated_analysis.json"
+                            automated_results = None
+                            if automated_path.exists():
+                                with open(automated_path) as f:
+                                    automated_results = json.load(f)
+                            
+                            # Extract metadata using V2 function
+                            snapshot_metadata = extract_snapshot_metadata(display_results, automated_results)
                             snapshot_metadata['filename'] = uploaded_file.name
                             snapshot_metadata['size_gb'] = f"{size_gb:.2f}"
                             snapshot_metadata['os_type'] = os_type
@@ -204,6 +281,9 @@ with tab1:
             st.session_state.snapshot_info = None
             st.rerun()
 
+# ========================
+# TAB 2: TIMELINE & ANALYSIS
+# ========================
 with tab2:
     if not st.session_state.analysis_complete:
         st.info("👈 **Upload and analyze a snapshot first**")
@@ -217,7 +297,6 @@ with tab2:
         - ✅ Real-time search and filtering
         - ✅ Device and user identification
         """)
-        
     else:
         results = st.session_state.analysis_results
         snapshot_info = st.session_state.snapshot_info or {}
@@ -234,7 +313,7 @@ with tab2:
         with info_col2:
             st.metric("🖥️ Computer Name", snapshot_info.get('computer_name', 'Unknown'))
         with info_col3:
-            st.metric("🪟 OS Version", snapshot_info.get('os_version', st.session_state.get('os_type', 'Unknown')))
+            st.metric("🪟 OS Version", snapshot_info.get('os_version', 'Unknown'))
         with info_col4:
             st.metric("📦 File Size", f"{snapshot_info.get('size_gb', 'N/A')} GB")
         
@@ -311,7 +390,7 @@ with tab2:
         
         st.markdown("---")
         
-        # TIMELINE CARDS
+        # EVENT TIMELINE
         st.subheader("🕒 Event Timeline")
         
         st.markdown("""
@@ -323,6 +402,7 @@ with tab2:
         
         timeline_events = []
         
+        # Add processes to timeline
         for i, proc in enumerate(procs[:30]):
             timeline_events.append({
                 'seq': i,
@@ -333,6 +413,7 @@ with tab2:
                 'time': f"Event #{i+1}"
             })
         
+        # Add network connections to timeline
         offset = len(timeline_events)
         for i, conn in enumerate(conns[:30]):
             timeline_events.append({
@@ -344,6 +425,7 @@ with tab2:
                 'time': f"Event #{offset+i+1}"
             })
         
+        # Add files to timeline
         offset = len(timeline_events)
         for i, file in enumerate(files[:20]):
             timeline_events.append({
@@ -355,18 +437,21 @@ with tab2:
                 'time': f"Event #{offset+i+1}"
             })
         
+        # Display timeline cards
         if timeline_events:
-            for event in timeline_events[:50]:
+            for event in timeline_events[:50]:  # Show first 50 events
                 susp_badge = "🔴 HIGH RISK" if event['suspicious'] >= 7 else ("🟡 MEDIUM" if event['suspicious'] >= 4 else ("🟢 LOW" if event['suspicious'] > 0 else ""))
                 
                 with st.expander(f"{event['time']} - {event['type']}: {event['name']} {susp_badge}", expanded=False):
                     st.markdown(f"**Details:** {event['details']}")
                     if event['suspicious'] > 0:
                         st.warning(f"⚠️ Suspicion Score: {event['suspicious']}/10")
+        else:
+            st.info("No events to display in timeline")
         
         st.markdown("---")
         
-        # DETAILED TABLES
+        # PROCESS TABLE
         st.subheader("💻 Process Analysis")
         if procs:
             procs_df = pd.DataFrame(procs)
@@ -379,6 +464,7 @@ with tab2:
         
         st.markdown("---")
         
+        # NETWORK TABLE
         st.subheader("🌐 Network Analysis")
         if conns:
             conns_df = pd.DataFrame(conns)
@@ -389,7 +475,9 @@ with tab2:
                 st.dataframe(conns_df, use_container_width=True, height=400)
                 st.download_button("📥 Download CSV", conns_df.to_csv(index=False), "connections.csv")
 
-# TAB 3 - ADVANCED ANALYTICS (WITHOUT PROCESS TREE)
+# ========================
+# TAB 3: ADVANCED ANALYTICS (ALL VISUALIZATIONS)
+# ========================
 with tab3:
     if not st.session_state.analysis_complete:
         st.info("👈 **Complete analysis first to view advanced analytics**")
@@ -407,7 +495,7 @@ with tab3:
         with info_col2:
             st.metric("🖥️ Device", snapshot_info.get('computer_name', 'Unknown'))
         with info_col3:
-            st.metric("🪟 OS", snapshot_info.get('os_version', st.session_state.get('os_type', 'Unknown')))
+            st.metric("🪟 OS", snapshot_info.get('os_version', snapshot_info.get('os_type', 'Unknown')))
         
         st.markdown("---")
         
@@ -490,7 +578,7 @@ with tab3:
         
         st.markdown("---")
         
-        # 3. MEMORY USAGE ANALYSIS
+        # 3. MEMORY USAGE DISTRIBUTION
         st.subheader("💾 Memory Usage Distribution")
         
         col_m1, col_m2 = st.columns(2)
@@ -500,8 +588,11 @@ with tab3:
                 st.markdown("#### Top 10 Thread Consumers")
                 name_col = 'ImageFileName' if 'ImageFileName' in procs_df.columns else 'comm'
                 pid_col = 'PID' if 'PID' in procs_df.columns else 'pid'
-                top_threads = procs_df.nlargest(10, 'Threads')[[name_col, pid_col, 'Threads']]
+                top_threads = procs_df.nlargest(10, 'Threads')[[name_col, pid_col, 'Threads']].reset_index(drop=True)
+                top_threads.index = top_threads.index + 1
                 st.dataframe(top_threads, use_container_width=True)
+            else:
+                st.info("Thread data not available")
         
         with col_m2:
             if not procs_df.empty and 'Threads' in procs_df.columns:
@@ -518,6 +609,24 @@ with tab3:
         
         # 4. CONNECTION STATE ANALYSIS
         st.subheader("🌐 Connection State Analysis")
+        
+        # 0.0.0.0 explanation
+        with st.expander("ℹ️ What does 0.0.0.0 mean?", expanded=False):
+            st.markdown("""
+            **0.0.0.0 = Listening on ALL network interfaces**
+            
+            Common examples:
+            - `0.0.0.0:80` → Web server (HTTP)
+            - `0.0.0.0:443` → Web server (HTTPS)
+            - `0.0.0.0:22` → SSH server
+            
+            ⚠️ **Suspicious if:**
+            - Unusual ports like `0.0.0.0:4444` (backdoor)
+            - Unknown processes listening
+            - Office apps acting as servers
+            """)
+        
+        st.markdown("---")
         
         if not conns_df.empty and 'State' in conns_df.columns:
             col_c1, col_c2 = st.columns(2)
@@ -537,18 +646,22 @@ with tab3:
             
             with col_c2:
                 if 'ForeignAddr' in conns_df.columns:
-                    top_ips = conns_df['ForeignAddr'].value_counts().head(10)
-                    fig_ips = px.bar(
-                        x=top_ips.values,
-                        y=top_ips.index,
-                        orientation='h',
-                        title='Top 10 External Connections',
-                        labels={'x': 'Connection Count', 'y': 'IP Address'},
-                        color=top_ips.values,
-                        color_continuous_scale='Reds'
-                    )
-                    fig_ips.update_layout(template='plotly_dark', height=350)
-                    st.plotly_chart(fig_ips, use_container_width=True)
+                    valid_addrs = conns_df[conns_df['ForeignAddr'].notna()]['ForeignAddr']
+                    if not valid_addrs.empty:
+                        top_ips = valid_addrs.value_counts().head(10)
+                        fig_ips = px.bar(
+                            x=top_ips.values,
+                            y=top_ips.index,
+                            orientation='h',
+                            title='Top 10 External Connections',
+                            labels={'x': 'Connection Count', 'y': 'IP Address'},
+                            color=top_ips.values,
+                            color_continuous_scale='Reds'
+                        )
+                        fig_ips.update_layout(template='plotly_dark', height=350)
+                        st.plotly_chart(fig_ips, use_container_width=True)
+                    else:
+                        st.info("No valid foreign addresses found")
         
         st.markdown("---")
         
@@ -628,7 +741,116 @@ with tab3:
         
         st.markdown("---")
         
-        # 7. COMPREHENSIVE STATISTICS
+        # 7. TOP 10 ANALYTICS
+        st.subheader("🏆 Top 10 Analytics")
+        
+        tab_top1, tab_top2, tab_top3 = st.tabs(["🔝 Processes", "🌐 Network", "📁 Files"])
+        
+        with tab_top1:
+            if not procs_df.empty:
+                col_top1, col_top2 = st.columns(2)
+                
+                with col_top1:
+                    st.markdown("#### Top 10 Most Active Processes")
+                    if 'Threads' in procs_df.columns:
+                        name_col = 'ImageFileName' if 'ImageFileName' in procs_df.columns else 'comm'
+                        pid_col = 'PID' if 'PID' in procs_df.columns else 'pid'
+                        top_active = procs_df.nlargest(10, 'Threads')[[name_col, pid_col, 'Threads']].reset_index(drop=True)
+                        top_active.index = top_active.index + 1
+                        st.dataframe(top_active, use_container_width=True)
+                
+                with col_top2:
+                    st.markdown("#### Top 10 Most Suspicious")
+                    if 'suspicious_score' in procs_df.columns:
+                        suspicious = procs_df[procs_df['suspicious_score'] > 0]
+                        if not suspicious.empty:
+                            name_col = 'ImageFileName' if 'ImageFileName' in procs_df.columns else 'comm'
+                            pid_col = 'PID' if 'PID' in procs_df.columns else 'pid'
+                            top_susp = suspicious.nlargest(10, 'suspicious_score')[[name_col, pid_col, 'suspicious_score']].reset_index(drop=True)
+                            top_susp.index = top_susp.index + 1
+                            st.dataframe(top_susp, use_container_width=True)
+                        else:
+                            st.success("✅ No suspicious processes!")
+        
+        with tab_top2:
+            if not conns_df.empty:
+                col_net1, col_net2 = st.columns(2)
+                
+                with col_net1:
+                    st.markdown("#### Top 10 Connected IPs")
+                    if 'ForeignAddr' in conns_df.columns:
+                        conns_df['ForeignAddr'] = conns_df['ForeignAddr'].fillna('').astype(str)
+                        external = conns_df[
+                            (conns_df['ForeignAddr'] != '') &
+                            (conns_df['ForeignAddr'] != '0.0.0.0') & 
+                            (conns_df['ForeignAddr'] != '::') &
+                            (~conns_df['ForeignAddr'].str.startswith('127.')) &
+                            (~conns_df['ForeignAddr'].str.startswith('::1'))
+                        ]
+                        if not external.empty:
+                            top_ips = external['ForeignAddr'].value_counts().head(10).reset_index()
+                            top_ips.columns = ['IP Address', 'Count']
+                            top_ips.index = top_ips.index + 1
+                            st.dataframe(top_ips, use_container_width=True)
+                        else:
+                            st.info("No external connections")
+                
+                with col_net2:
+                    st.markdown("#### Top 10 Listening Ports")
+                    if 'LocalAddr' in conns_df.columns and 'LocalPort' in conns_df.columns:
+                        conns_df['LocalAddr'] = conns_df['LocalAddr'].fillna('').astype(str)
+                        listening = conns_df[
+                            (conns_df['LocalAddr'].isin(['0.0.0.0', '::'])) |
+                            (conns_df['LocalAddr'].str.startswith('0.0.0.0')) |
+                            (conns_df['LocalAddr'].str.startswith('::'))
+                        ]
+                        if not listening.empty:
+                            top_listening = listening['LocalPort'].value_counts().head(10).reset_index()
+                            top_listening.columns = ['Port', 'Count']
+                            port_names = {
+                                80: 'HTTP', 443: 'HTTPS', 22: 'SSH', 21: 'FTP',
+                                3306: 'MySQL', 5432: 'PostgreSQL', 1433: 'MSSQL',
+                                3389: 'RDP', 445: 'SMB', 139: 'NetBIOS'
+                            }
+                            top_listening['Service'] = top_listening['Port'].map(port_names).fillna('Unknown')
+                            top_listening.index = top_listening.index + 1
+                            st.dataframe(top_listening, use_container_width=True)
+                            
+                            suspicious_ports = [4444, 31337, 1337, 8080, 8888]
+                            susp_found = top_listening[top_listening['Port'].isin(suspicious_ports)]
+                            if not susp_found.empty:
+                                st.warning(f"⚠️ Found {len(susp_found)} suspicious ports!")
+                        else:
+                            st.info("No listening services")
+        
+        with tab_top3:
+            if not files_df.empty:
+                col_file1, col_file2 = st.columns(2)
+                
+                with col_file1:
+                    st.markdown("#### Top 10 File Extensions")
+                    if 'FileName' in files_df.columns or 'Name' in files_df.columns:
+                        name_col = 'FileName' if 'FileName' in files_df.columns else 'Name'
+                        files_df['Extension'] = files_df[name_col].astype(str).str.extract(r'\.([^.]+)$')[0]
+                        ext_counts = files_df['Extension'].value_counts().head(10).reset_index()
+                        ext_counts.columns = ['Extension', 'Count']
+                        ext_counts.index = ext_counts.index + 1
+                        st.dataframe(ext_counts, use_container_width=True)
+                
+                with col_file2:
+                    st.markdown("#### Top 10 Accessed Paths")
+                    if 'FileName' in files_df.columns or 'Name' in files_df.columns:
+                        name_col = 'FileName' if 'FileName' in files_df.columns else 'Name'
+                        files_df['Directory'] = files_df[name_col].astype(str).str.rsplit('\\', n=1).str[0]
+                        dir_counts = files_df['Directory'].value_counts().head(10).reset_index()
+                        dir_counts.columns = ['Directory', 'Count']
+                        dir_counts.index = dir_counts.index + 1
+                        dir_counts['Directory'] = dir_counts['Directory'].str[-50:]
+                        st.dataframe(dir_counts, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # 8. COMPREHENSIVE STATISTICS
         st.subheader("📊 Comprehensive Statistics")
         
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -666,18 +888,19 @@ with tab3:
         # EXPORT
         st.subheader("📄 Export Results")
         
-        if st.button("📥 Generate Full JSON Report", use_container_width=True, type="primary"):
+        if st.button("📥 Generate JSON Report", use_container_width=True, type="primary"):
             report = generate_json_report(results)
             st.download_button(
-                "Download Complete Report",
+                "Download Report",
                 report,
                 f"vast_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 "application/json",
                 use_container_width=True
             )
 
+# SIDEBAR
 with st.sidebar:
-    st.markdown("### 🔍 VAST v2.0")
+    st.markdown("### 🔍 VAST v3.0")
     st.markdown("**Advanced Forensics Platform**")
     st.markdown("---")
     
@@ -690,7 +913,7 @@ with st.sidebar:
         st.markdown(f"**Size:** {info.get('size_gb', 'N/A')} GB")
         st.markdown("---")
     
-    st.markdown("### 📊 Dashboard Tabs")
+    st.markdown("### 📊 Dashboard")
     st.markdown("""
     **Tab 1:** Upload & Configure
     **Tab 2:** Timeline & Analysis  
@@ -698,14 +921,14 @@ with st.sidebar:
     """)
     
     st.markdown("---")
-    st.markdown("### 🆕 Key Features")
+    st.markdown("### 🆕 Features")
     st.markdown("""
     - 100GB file support
+    - macOS, Linux, Windows
     - Device identification
-    - User extraction
     - AI threat detection
-    - MITRE ATT&CK mapping
-    - 7 advanced visualizations
+    - MITRE ATT&CK
+    - 8 visualizations
     - Real-time search
     """)
     
