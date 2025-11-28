@@ -512,16 +512,16 @@ with tab3:
         st.header(" Advanced Analytics & Visualizations")
         
         # SNAPSHOT INFO AT TOP
-        st.markdown("### Device Information")
-        info_col1, info_col2, info_col3 = st.columns(3)
-        with info_col1:
-            st.metric(" User", snapshot_info.get('username', 'Unknown'))
-        with info_col2:
-            st.metric(" Device", snapshot_info.get('computer_name', 'Unknown'))
-        with info_col3:
-            st.metric("🪟 OS", snapshot_info.get('os_version', snapshot_info.get('os_type', 'Unknown')))
+        # st.markdown("### Device Information")
+        # info_col1, info_col2, info_col3 = st.columns(3)
+        # with info_col1:
+        #     st.metric(" User", snapshot_info.get('username', 'Unknown'))
+        # with info_col2:
+        #     st.metric(" Device", snapshot_info.get('computer_name', 'Unknown'))
+        # with info_col3:
+        #     st.metric("🪟 OS", snapshot_info.get('os_version', snapshot_info.get('os_type', 'Unknown')))
         
-        st.markdown("---")
+        # st.markdown("---")
         
         procs = results.get('processes', [])
         conns = results.get('connections', [])
@@ -696,46 +696,46 @@ with tab3:
         
         st.markdown("---")
         
-        # 6. MITRE ATT&CK HEATMAP
-        st.subheader(" MITRE ATT&CK Technique Coverage")
+        # # 6. MITRE ATT&CK HEATMAP
+        # st.subheader(" MITRE ATT&CK Technique Coverage")
         
-        st.info(" MITRE ATT&CK mapping shows which attack techniques were observed in the snapshot")
+        # st.info(" MITRE ATT&CK mapping shows which attack techniques were observed in the snapshot")
         
-        if not procs_df.empty and 'suspicious_score' in procs_df.columns:
-            suspicious_count = len(procs_df[procs_df['suspicious_score'] > 0])
+        # if not procs_df.empty and 'suspicious_score' in procs_df.columns:
+        #     suspicious_count = len(procs_df[procs_df['suspicious_score'] > 0])
             
-            techniques = {
-                'T1055 - Process Injection': min(suspicious_count * 0.3, 10),
-                'T1059 - Command Execution': min(suspicious_count * 0.4, 10),
-                'T1071 - Application Layer Protocol': min(len(conns_df) * 0.1, 10) if not conns_df.empty else 0,
-                'T1082 - System Information Discovery': min(len(procs_df) * 0.05, 10),
-                'T1083 - File Discovery': min(len(files_df) * 0.02, 10) if not files_df.empty else 0,
-                'T1057 - Process Discovery': min(len(procs_df) * 0.08, 10),
-                'T1049 - System Network Connections': min(len(conns_df) * 0.15, 10) if not conns_df.empty else 0,
-            }
+        #     techniques = {
+        #         'T1055 - Process Injection': min(suspicious_count * 0.3, 10),
+        #         'T1059 - Command Execution': min(suspicious_count * 0.4, 10),
+        #         'T1071 - Application Layer Protocol': min(len(conns_df) * 0.1, 10) if not conns_df.empty else 0,
+        #         'T1082 - System Information Discovery': min(len(procs_df) * 0.05, 10),
+        #         'T1083 - File Discovery': min(len(files_df) * 0.02, 10) if not files_df.empty else 0,
+        #         'T1057 - Process Discovery': min(len(procs_df) * 0.08, 10),
+        #         'T1049 - System Network Connections': min(len(conns_df) * 0.15, 10) if not conns_df.empty else 0,
+        #     }
             
-            fig_mitre = go.Figure(data=go.Bar(
-                x=list(techniques.values()),
-                y=list(techniques.keys()),
-                orientation='h',
-                marker=dict(
-                    color=list(techniques.values()),
-                    colorscale='Reds',
-                    showscale=True,
-                    colorbar=dict(title="Confidence")
-                )
-            ))
+        #     fig_mitre = go.Figure(data=go.Bar(
+        #         x=list(techniques.values()),
+        #         y=list(techniques.keys()),
+        #         orientation='h',
+        #         marker=dict(
+        #             color=list(techniques.values()),
+        #             colorscale='Reds',
+        #             showscale=True,
+        #             colorbar=dict(title="Confidence")
+        #         )
+        #     ))
             
-            fig_mitre.update_layout(
-                title='MITRE ATT&CK Techniques Detected',
-                xaxis_title='Confidence Score',
-                yaxis_title='Technique',
-                template='plotly_dark',
-                height=400
-            )
-            st.plotly_chart(fig_mitre, use_container_width=True)
+        #     fig_mitre.update_layout(
+        #         title='MITRE ATT&CK Techniques Detected',
+        #         xaxis_title='Confidence Score',
+        #         yaxis_title='Technique',
+        #         template='plotly_dark',
+        #         height=400
+        #     )
+        #     st.plotly_chart(fig_mitre, use_container_width=True)
         
-        st.markdown("---")
+        # st.markdown("---")
         
         # 7. TOP 10 ANALYTICS
         st.subheader(" Top 10 Analytics")
