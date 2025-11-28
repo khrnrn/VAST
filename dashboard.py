@@ -337,7 +337,7 @@ with tab2:
         with info_col2:
             st.metric(" Computer Name", snapshot_info.get('computer_name', 'Unknown'))
         with info_col3:
-            st.metric("🪟 OS Version", snapshot_info.get('os_version', 'Unknown'))
+            st.metric(" OS Version", snapshot_info.get('os_version', 'Unknown'))
         with info_col4:
             st.metric(" File Size", f"{snapshot_info.get('size_gb', 'N/A')} GB")
         
