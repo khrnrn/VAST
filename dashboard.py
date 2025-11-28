@@ -500,6 +500,27 @@ with tab2:
                 st.dataframe(conns_df, use_container_width=True, height=400)
                 st.download_button(" Download CSV", conns_df.to_csv(index=False), "connections.csv")
 
+        st.markdown("---")
+
+        # FILE TABLE
+        st.subheader(" File Analysis")
+        if files:
+            files_df = pd.DataFrame(files)
+            
+            # remove volatile children column if present
+            if '__children' in files_df.columns:
+                files_df = files_df.drop(columns=['__children'])
+            
+            with st.expander(" All File Objects", expanded=False):
+                st.dataframe(files_df, use_container_width=True, height=400)
+                st.download_button(
+                    " Download CSV",
+                    files_df.to_csv(index=False),
+                    "file_objects.csv"
+                )
+        else:
+            st.info(" No file objects extracted")
+
 # ========================
 # TAB 3: ADVANCED ANALYTICS (ALL VISUALIZATIONS)
 # ========================
