@@ -242,7 +242,7 @@ with tab1:
                             display_results = analyzer.load_results(Path(results["session_dir"]))
                             
                             # Load automated results for metadata
-                            automated_path = Path(results["session_dir"]) / "automated" / "automated_analysis.json"
+                            automated_path = Path(results["session_dir"]) / "reports" / "automated_analysis.json"
                             automated_results = None
                             if automated_path.exists():
                                 with open(automated_path) as f:

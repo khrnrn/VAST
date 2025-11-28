@@ -488,7 +488,49 @@ class AutomatedAnalyzer:
     def generate_summary(self):
         """Generate executive summary."""
         logger.info("Generating summary...")
-        
+
+        # Start from whatever analyze_system_info() already collected
+        # (keeps plugin_output so dashboard OS detection still works)
+        sys_info = self.analysis_results.get("system_info", {}).copy()
+
+        # 1. Computer name
+        computer_name = sys_info.get("computer_name", "Unknown")
+
+        # 2. Primary username (filter out system / machine accounts)
+        users = sys_info.get("usernames", [])
+        system_accounts = {"SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"}
+
+        real_users = [
+            u for u in users
+            if u and not u.endswith("$") and u not in system_accounts
+        ]
+        primary_user = real_users[0] if real_users else "Unknown"
+
+        # 3. OS Version + architecture from memory_enriched.json
+        try:
+            with open(self.memory_json, "r") as f:
+                mem = json.load(f)
+
+            os_type = mem.get("os_type", "Unknown")
+            build = mem.get("build_number") or mem.get("BuildNumber")
+            architecture = mem.get("architecture", "Unknown")
+
+            if os_type != "Unknown" and build:
+                os_version = f"{os_type} (Build {build})"
+            else:
+                os_version = os_type
+        except Exception:
+            os_version = "Unknown"
+            architecture = "Unknown"
+
+        sys_info["username"] = primary_user
+        sys_info["computer_name"] = computer_name
+        sys_info["os_version"] = os_version
+        sys_info["architecture"] = architecture
+        sys_info["usernames"] = users  # keep full list
+
+        self.analysis_results["system_info"] = sys_info
+
         summary = {
             "analysis_timestamp": self.analysis_results["timestamp"],
             "risk_score": self.calculate_risk_score(),
@@ -519,7 +561,7 @@ class AutomatedAnalyzer:
                 "low_severity": len([f for f in self.analysis_results["suspicious_findings"] if f["severity"] == "LOW"])
             }
         }
-        
+
         self.analysis_results["summary"] = summary
     
     def run_analysis(self) -> Dict[str, Any]:
