@@ -36,7 +36,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='big-font'> VAST - Volatile Artifact Snapshot Triage</div>", unsafe_allow_html=True)
-st.markdown("**Advanced Memory Forensics Dashboard • AI-Powered Threat Detection**")
+st.markdown("**Advanced Memory Forensics Dashboard**")
 st.markdown("---")
 
 # Initialize session state
@@ -174,8 +174,8 @@ with tab1:
     with col1:
         uploaded_file = st.file_uploader(
             "Choose snapshot file",
-            type=['vmem', 'vmsn', 'sav', 'raw', 'gz'],
-            help="Supports VMware (.vmem/.vmsn), VirtualBox (.sav), Raw (.raw), Compressed (.gz) - Max 100GB"
+            type=['vmem', 'vmsn', 'sav'],
+            help="Supports VMware (.vmem/.vmsn), VirtualBox (.sav) - Max 100GB"
         )
 
         if uploaded_file:
@@ -199,11 +199,27 @@ with tab1:
     st.subheader("3. Analysis Options")
     c1, c2 = st.columns(2)
     with c1:
-        extract_processes = st.checkbox(" Extract Processes", True, help="Running processes & metadata")
-        extract_network = st.checkbox(" Extract Network", True, help="Active connections & ports")
+        extract_processes = st.checkbox(" Extract Processes", True, help="Extract running processes, PIDs, and process metadata")
+        extract_network = st.checkbox(" Extract Network", True, help="Extract active connections, listening ports, and network activity")
     with c2:
-        extract_files = st.checkbox(" Extract Files", True, help="Open file handles")
-        extract_registry = st.checkbox(" Registry (Windows)", os_type == "Windows", help="Registry activity")
+        extract_files = st.checkbox(" Extract Files", True, help="Extract open file handles and file objects")
+        extract_registry = st.checkbox(" Registry (Windows)", os_type == "Windows", help="Extract registry hives and activity (Windows only)")
+
+    # Display what will be extracted
+    selected_options = []
+    if extract_processes:
+        selected_options.append("Processes")
+    if extract_network:
+        selected_options.append("Network")
+    if extract_files:
+        selected_options.append("Files")
+    if extract_registry and os_type == "Windows":
+        selected_options.append("Registry")
+    
+    if selected_options:
+        st.success(f" Will extract: {', '.join(selected_options)}")
+    else:
+        st.warning(" No extraction options selected!")
 
     st.markdown("---")
     
@@ -217,6 +233,8 @@ with tab1:
                 st.error(" Backend not configured")
             elif size_gb > 100:
                 st.error(" File exceeds 100GB limit")
+            elif not any([extract_processes, extract_network, extract_files, extract_registry]):
+                st.error(" Select at least one extraction option!")
             else:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                     tmp.write(uploaded_file.getvalue())
@@ -230,13 +248,19 @@ with tab1:
                         def update(msg, prog):
                             status.text(msg)
                             progress.progress(prog)
-                        
-                        results = run_analysis(tmp_path, os_type.lower(), {
+
+                        # Prepare options dict
+                        analysis_options = {
                             "extract_processes": extract_processes,
                             "extract_network": extract_network,
                             "extract_files": extract_files,
-                            "extract_registry": extract_registry and os_type=="Windows"
-                        }, update)
+                            "extract_registry": extract_registry and os_type == "Windows"
+                        }
+
+                        # Display selected options
+                        st.info(f" Extracting: {', '.join([k.replace('extract_', '').title() for k, v in analysis_options.items() if v])}")
+                        
+                        results = run_analysis(tmp_path, os_type.lower(), analysis_options, update)
                         
                         if results.get("success"):
                             analyzer = VASTAnalyzer()
