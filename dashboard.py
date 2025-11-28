@@ -1152,7 +1152,7 @@ with tab4:
                             })
                 
                 if suspicious:
-                    st.error(f"⚠️ Found {len(suspicious)} suspicious ports")
+                    st.error(f" Found {len(suspicious)} suspicious ports")
                     st.dataframe(pd.DataFrame(suspicious), height=300)
                 else:
                     st.success("No suspicious ports detected")
@@ -1365,26 +1365,26 @@ with tab4:
             
             st.markdown("---")
             
-            # MITRE ATT&CK Mapping
-            st.markdown("### MITRE ATT&CK Mapping")
+            # # MITRE ATT&CK Mapping
+            # st.markdown("### MITRE ATT&CK Mapping")
             
-            techniques_found = []
+            # techniques_found = []
             
-            # Check for various techniques
-            if any('powershell' in str(p.get('ImageFileName', '')).lower() for p in procs):
-                techniques_found.append(("T1059.001", "PowerShell", "Execution"))
+            # # Check for various techniques
+            # if any('powershell' in str(p.get('ImageFileName', '')).lower() for p in procs):
+            #     techniques_found.append(("T1059.001", "PowerShell", "Execution"))
             
-            if any('cmd' in str(p.get('ImageFileName', '')).lower() for p in procs):
-                techniques_found.append(("T1059.003", "Windows Command Shell", "Execution"))
+            # if any('cmd' in str(p.get('ImageFileName', '')).lower() for p in procs):
+            #     techniques_found.append(("T1059.003", "Windows Command Shell", "Execution"))
             
-            if any(c.get('State') == 'ESTABLISHED' for c in conns):
-                techniques_found.append(("T1071", "Application Layer Protocol", "Command and Control"))
+            # if any(c.get('State') == 'ESTABLISHED' for c in conns):
+            #     techniques_found.append(("T1071", "Application Layer Protocol", "Command and Control"))
             
-            if techniques_found:
-                tech_df = pd.DataFrame(techniques_found, columns=['Technique ID', 'Technique Name', 'Tactic'])
-                st.dataframe(tech_df, height=300)
-            else:
-                st.info("No MITRE ATT&CK techniques mapped")
+            # if techniques_found:
+            #     tech_df = pd.DataFrame(techniques_found, columns=['Technique ID', 'Technique Name', 'Tactic'])
+            #     st.dataframe(tech_df, height=300)
+            # else:
+            #     st.info("No MITRE ATT&CK techniques mapped")
 
 
 # SIDEBAR
