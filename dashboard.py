@@ -11,6 +11,36 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# ========================
+# AUTO SYMBOL DOWNLOAD
+# ========================
+def download_symbols_if_needed(os_type):
+    """Auto-download symbols for the selected OS type"""
+    import subprocess
+    
+    symbol_dir = Path.home() / ".cache" / "volatility3" / "symbols"
+    
+    # Check what symbols we need
+    needs_download = False
+    
+    if os_type.lower() == "macos":
+        # Check for macOS symbols
+        if not symbol_dir.exists() or not list(symbol_dir.glob("mac-*.json")):
+            needs_download = True
+            symbol_type = "macOS"
+    elif os_type.lower() == "linux":
+        # Check for Linux symbols
+        if not symbol_dir.exists() or not list(symbol_dir.glob("linux-*.json")):
+            needs_download = True
+            symbol_type = "Linux"
+    # Windows symbols usually included in snapshot, no download needed
+    
+    if needs_download:
+        return symbol_type
+    return None
+
+# ========================
+
 try:
     from vast_integration import VASTAnalyzer, run_analysis
     BACKEND_AVAILABLE = True
@@ -148,6 +178,29 @@ with tab1:
             elif size_gb > 100:
                 st.error("⚠️ File exceeds 100GB limit")
             else:
+                # Check if symbols needed
+                missing_symbols = download_symbols_if_needed(os_type)
+                
+                if missing_symbols:
+                    with st.expander("⚠️ Symbols Required", expanded=True):
+                        st.warning(f"""
+                        **{missing_symbols} symbols not found**
+                        
+                        First-time {missing_symbols} analysis requires downloading symbols (~300MB).
+                        This is a one-time download that takes 10-15 minutes.
+                        
+                        **Option 1: Auto-download now (recommended)**
+                        Symbols will download automatically during analysis.
+                        
+                        **Option 2: Manual download**
+                        Run in Terminal:
+                        ```bash
+                        volatility3 -f your_snapshot.raw {os_type.lower()}.info
+                        ```
+                        
+                        Click 'Start Analysis' to continue with auto-download.
+                        """)
+                
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                     tmp.write(uploaded_file.getvalue())
                     tmp_path = tmp.name
