@@ -1,4 +1,3 @@
-
 # dashboard.py - VAST Memory Forensics Dashboard (MERGED v3.0)
 import streamlit as st
 import pandas as pd
@@ -170,31 +169,82 @@ tab1, tab2, tab3, tab4 = st.tabs(["Upload Snapshot", "Timeline & Analysis", "Adv
 
 with tab1:
     st.header("Upload VM Snapshot")
-
+    
+    # OS Selection FIRST (before file upload)
+    os_type = st.selectbox("Guest OS", ["Windows", "Linux", "macOS"], index=0, 
+                          help="Select the operating system of the memory snapshot")
+    
     col1, col2 = st.columns([2, 1])
     with col1:
-        uploaded_file = st.file_uploader(
-            "Choose snapshot file",
-            type=['vmem', 'vmsn', 'sav'],
-            help="Supports VMware (.vmem/.vmsn), VirtualBox (.sav) - Max 100GB"
+        # Clear instructions for multiple file upload
+        if os_type == "Linux":
+            st.info("**Linux requires 2 files:** Select both .vmem AND .vmsn files (hold Cmd/Ctrl to select multiple)")
+        
+        uploaded_files = st.file_uploader(
+            "Choose snapshot file(s)" if os_type != "Linux" else "Choose BOTH .vmem and .vmsn files",
+            type=['vmem', 'vmsn', 'sav', 'raw', 'gz'],
+            help="For Linux: Upload BOTH .vmem and .vmsn files | For Windows/macOS: Upload .vmem, .raw, or .sav file",
+            accept_multiple_files=True  # Enable multiple file upload
         )
 
-        if uploaded_file:
-            size_gb = uploaded_file.size / (1024**3)
-            size_str = f"{size_gb:.2f} GB" if size_gb >= 1 else f"{uploaded_file.size / (1024**2):.1f} MB"
-
-            if size_gb > 100:
-                st.error(f" File too large: {size_str} (Max: 100GB)")
-            else:
-                st.success(f" {uploaded_file.name}")
-                st.info(f" Size: {size_str}")
+        if uploaded_files:
+            st.markdown("### Uploaded Files:")
+            total_size = 0
+            
+            # Display each uploaded file clearly
+            for idx, uploaded_file in enumerate(uploaded_files, 1):
+                size_gb = uploaded_file.size / (1024**3)
+                size_str = f"{size_gb:.2f} GB" if size_gb >= 1 else f"{uploaded_file.size / (1024**2):.1f} MB"
+                total_size += uploaded_file.size
                 
-                if size_gb > 5:
-                    st.warning(f" Large file! If upload fails:")
-                    st.code("# Compress first:\ngzip your_snapshot.raw", language="bash")
+                # Color-code by file type
+                if uploaded_file.name.endswith('.vmem'):
+                    st.success(f"{idx}. {uploaded_file.name} - {size_str} (Memory dump)")
+                elif uploaded_file.name.endswith('.vmsn'):
+                    st.info(f"{idx}. {uploaded_file.name} - {size_str} (Snapshot metadata)")
+                elif uploaded_file.name.endswith('.raw'):
+                    st.success(f"{idx}. {uploaded_file.name} - {size_str} (Raw memory)")
+                else:
+                    st.write(f"{idx}. {uploaded_file.name} - {size_str}")
+            
+            # Show total size
+            total_gb = total_size / (1024**3)
+            total_str = f"{total_gb:.2f} GB" if total_gb >= 1 else f"{total_size / (1024**2):.1f} MB"
+            st.markdown(f"**Total size:** {total_str}")
+            
+            # Warning for large files
+            if total_gb > 100:
+                st.error(f"Combined files too large: {total_str} (Max: 100GB)")
+            elif total_gb > 5:
+                st.warning(" Large files detected - analysis may take 15-20 minutes")
+            
+            # Linux-specific validation
+            if os_type == "Linux":
+                vmem_files = [f for f in uploaded_files if f.name.endswith('.vmem')]
+                vmsn_files = [f for f in uploaded_files if f.name.endswith('.vmsn')]
+                
+                if vmem_files and vmsn_files:
+                    vmem_base = vmem_files[0].name.rsplit('.', 1)[0]
+                    vmsn_base = vmsn_files[0].name.rsplit('.', 1)[0]
+                    
+                    if vmem_base == vmsn_base:
+                        st.success(f" File names match: {vmem_base}")
+                    else:
+                        st.error(f" File name mismatch! .vmem and .vmsn must have same base name")
+                        st.write(f"   .vmem: {vmem_base}")
+                        st.write(f"   .vmsn: {vmsn_base}")
+                elif not vmsn_files:
+                    st.warning(" Linux analysis requires both .vmem AND .vmsn files")
 
     with col2:
-        os_type = st.selectbox("Guest OS", ["Windows", "Linux", "macOS"], index=0)
+        st.markdown("**File Requirements:**")
+        if os_type == "Linux":
+            st.info("Linux needs both .vmem AND .vmsn files")
+        elif os_type == "Windows":
+            st.info("Windows needs .vmem or .raw file")
+        else:
+            st.info("macOS needs .raw or .vmem file")
+
 
     st.markdown("---")
     st.subheader("3. Analysis Options")
@@ -228,23 +278,41 @@ with tab1:
     
     with col_btn1:
         if st.button(" Start Analysis", type="primary", use_container_width=True):
-            if not uploaded_file:
-                st.error(" Upload a file first!")
+            if not uploaded_files:
+                st.error(" Upload file(s) first!")
             elif not BACKEND_AVAILABLE:
                 st.error(" Backend not configured")
-            elif size_gb > 100:
-                st.error(" File exceeds 100GB limit")
+            elif total_gb > 100:
+                st.error(" Files exceed 100GB limit")
             elif not any([extract_processes, extract_network, extract_files, extract_registry]):
                 st.error(" Select at least one extraction option!")
             else:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
-                    tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
+                # Save all uploaded files to temp directory
+                save_temp = Path(tempfile.gettempdir()) / "vast_uploads"
+                save_temp.mkdir(exist_ok=True)
                 
-                try:
-                    with st.spinner(" Analyzing..."):
-                        progress = st.progress(0)
-                        status = st.empty()
+                saved_files = []
+                for uploaded_file in uploaded_files:
+                    tmp_path = save_temp / uploaded_file.name
+                    with open(tmp_path, 'wb') as f:
+                        f.write(uploaded_file.getvalue())
+                    saved_files.append(tmp_path)
+                    st.info(f"Saved: {uploaded_file.name}")
+                
+                # Use the primary file (.vmem or .raw) for analysis
+                primary_file = None
+                for f in saved_files:
+                    if f.suffix.lower() in ['.vmem', '.raw', '.sav']:
+                        primary_file = f
+                        break
+                
+                if not primary_file:
+                    st.error(" No valid memory dump found (.vmem, .raw, or .sav)")
+                else:
+                    try:
+                        with st.spinner(" Analyzing..."):
+                            progress = st.progress(0)
+                            status = st.empty()
                         
                         def update(msg, prog):
                             status.text(msg)
@@ -261,7 +329,8 @@ with tab1:
                         # Display selected options
                         st.info(f" Extracting: {', '.join([k.replace('extract_', '').title() for k, v in analysis_options.items() if v])}")
                         
-                        results = run_analysis(tmp_path, os_type.lower(), analysis_options, update)
+                        # Pass ALL saved files (including .vmsn) to run_analysis
+                        results = run_analysis(saved_files, os_type.lower(), analysis_options, update)
                         
                         if results.get("success"):
                             analyzer = VASTAnalyzer()
@@ -276,11 +345,12 @@ with tab1:
                             
                             # Extract metadata using V2 function
                             snapshot_metadata = extract_snapshot_metadata(display_results, automated_results)
-                            snapshot_metadata['filename'] = uploaded_file.name
-                            snapshot_metadata['size_gb'] = f"{size_gb:.2f}"
+                            snapshot_metadata['filename'] = primary_file.name
+                            snapshot_metadata['size_gb'] = f"{total_gb:.2f}"
                             snapshot_metadata['os_type'] = os_type
                             
                             st.session_state.analysis_results = display_results
+                            st.session_state.raw_file_path = str(primary_file)
                             st.session_state.session_dir = results["session_dir"]
                             st.session_state.os_type = os_type
                             st.session_state.snapshot_info = snapshot_metadata
@@ -293,11 +363,15 @@ with tab1:
                             st.balloons()
                         else:
                             st.error(" Analysis failed")
-                except Exception as e:
-                    st.error(f" Error: {str(e)}")
-                finally:
-                    try: os.unlink(tmp_path)
-                    except: pass
+                    except Exception as e:
+                        st.error(f" Error: {str(e)}")
+                    finally:
+                        # Cleanup saved files
+                        for f in saved_files:
+                            try:
+                                f.unlink()
+                            except:
+                                pass
     
     with col_btn2:
         if st.button(" Clear", use_container_width=True):

@@ -87,7 +87,7 @@ class VASTAnalyzer:
     
     def analyze_snapshot(
         self,
-        snapshot_file: Path,
+        snapshot_files,  # List of Path objects or single Path
         os_type: str = "windows",
         extract_processes: bool = True,
         extract_network: bool = True,
@@ -97,16 +97,27 @@ class VASTAnalyzer:
         extract_secrets: bool = False,
     ) -> Dict[str, Any]:
         """
-        Run the full VAST analysis pipeline on a snapshot file.
+        Run the full VAST analysis pipeline on snapshot file(s).
         
         Args:
-            snapshot_file: Path to the VM snapshot file
-            os_type: Operating system type ('windows' or 'linux')
+            snapshot_files: Path object(s) to VM snapshot file(s) - for Linux, include both .vmem and .vmsn
+            os_type: Operating system type ('windows', 'linux', or 'macos')
             extract_*: Flags for what artifacts to extract
             
         Returns:
             Dictionary containing analysis results and file paths
         """
+        # Convert to list if single file
+        if isinstance(snapshot_files, Path):
+            file_list = [snapshot_files]
+        else:
+            file_list = list(snapshot_files)
+        # Convert to list if single file
+        if isinstance(snapshot_files, Path):
+            file_list = [snapshot_files]
+        else:
+            file_list = list(snapshot_files)
+        
         results = {
             "success": False,
             "session_dir": None,
@@ -136,10 +147,14 @@ class VASTAnalyzer:
             
             # Step 1: Parse snapshot (14% of total)
             self._update_progress("Parsing VM snapshot file...", 0.0)
-            success, output = self._run_script(
-                "parser.py",
-                [str(snapshot_file), "--session", str(self.session_dir)]
-            )
+            
+            # Pass ALL files to parser (important for Linux .vmem + .vmsn)
+            parser_args = []
+            for f in file_list:
+                parser_args.append(str(f))
+            parser_args.extend(["--session", str(self.session_dir)])
+            
+            success, output = self._run_script("parser.py", parser_args)
             
             if not success:
                 results["errors"].append(f"Snapshot parsing failed: {output}")
@@ -147,10 +162,14 @@ class VASTAnalyzer:
             
             self._update_progress("Snapshot parsed successfully", 0.14)
             
-            # Find the raw memory file
-            raw_files = list((self.session_dir / "raw").glob("snapshot_*.raw"))
+            # Find the raw memory file (check for .vmem, .raw, .sav)
+            raw_files = (
+                list((self.session_dir / "raw").glob("snapshot_*.vmem")) +
+                list((self.session_dir / "raw").glob("snapshot_*.raw")) +
+                list((self.session_dir / "raw").glob("snapshot_*.sav"))
+            )
             if not raw_files:
-                results["errors"].append("No raw memory file generated")
+                results["errors"].append("No raw memory file generated (.vmem, .raw, or .sav)")
                 return results
             
             raw_memory = max(raw_files, key=lambda p: p.stat().st_mtime)
@@ -237,7 +256,7 @@ class VASTAnalyzer:
             
             # Step 5: Generate final report (85% total - 15% for this step)
             self._update_progress("Generating final report...", 0.70)
-            report = self._generate_report(results, snapshot_file, os_type)
+            report = self._generate_report(results, file_list, os_type)
             
             report_path = self.session_dir / "reports" / f"vast_report_{timestamp}.json"
             report_path.write_text(json.dumps(report, indent=2))
@@ -274,12 +293,12 @@ class VASTAnalyzer:
         
         return results
     
-    def _generate_report(self, results: Dict[str, Any], snapshot_file: Path, os_type: str) -> Dict[str, Any]:
+    def _generate_report(self, results: Dict[str, Any], snapshot_files: list, os_type: str) -> Dict[str, Any]:
         """Generate the final VAST report."""
         report = {
             "vast_version": "1.0",
             "timestamp": datetime.now().isoformat(),
-            "input_snapshot": str(snapshot_file),
+            "input_snapshots": [str(f) for f in snapshot_files],  # List all input files
             "os_type": os_type,
             "session_dir": results["session_dir"],
             "files": {
@@ -424,7 +443,7 @@ class VASTAnalyzer:
 
 # Convenience function for dashboard
 def run_analysis(
-    snapshot_path: str,
+    snapshot_files,  # Can be a single path string or list of Path objects
     os_type: str,
     options: Dict[str, bool],
     progress_callback: Optional[Callable] = None
@@ -433,7 +452,7 @@ def run_analysis(
     Convenience function to run VAST analysis from dashboard.
     
     Args:
-        snapshot_path: Path to snapshot file
+        snapshot_files: Path to snapshot file(s) - string or list of Path objects
         os_type: Operating system type
         options: Dictionary of extraction options
         progress_callback: Optional callback for progress updates
@@ -446,8 +465,14 @@ def run_analysis(
     if progress_callback:
         analyzer.set_progress_callback(progress_callback)
     
+    # Convert to list if single file
+    if isinstance(snapshot_files, (str, Path)):
+        files = [Path(snapshot_files)]
+    else:
+        files = [Path(f) for f in snapshot_files]
+    
     return analyzer.analyze_snapshot(
-        snapshot_file=Path(snapshot_path),
+        snapshot_files=files,  # Pass list of files
         os_type=os_type,
         extract_processes=options.get("extract_processes", True),
         extract_network=options.get("extract_network", True),

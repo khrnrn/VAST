@@ -92,7 +92,7 @@ class MemoryArtifactExtractor:
         if self.os_type == "linux":
             has_isf = any(arg == "-u" for arg in effective_extra_args)
             if not has_isf:
-                effective_extra_args = ["-u", "https://github.com/leludo84/vol3-linux-profiles/blob/main/banners-isf.json"] + effective_extra_args
+                effective_extra_args = ["-u", "https://raw.githubusercontent.com/leludo84/vol3-linux-profiles/main/banners-isf.json"] + effective_extra_args
 
         cmd.extend(effective_extra_args)
         cmd.append(plugin)
