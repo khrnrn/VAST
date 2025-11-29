@@ -355,7 +355,7 @@ with tab1:
                             st.session_state.os_type = os_type
                             st.session_state.snapshot_info = snapshot_metadata
                             st.session_state.analysis_complete = True
-                            
+
                             status.empty()
                             progress.empty()
                             st.success(" Analysis Complete!")
@@ -764,13 +764,14 @@ with tab3:
             col_f1, col_f2 = st.columns(2)
             
             with col_f1:
+                st.markdown("#### File System Analysis")
                 st.metric(" Total File Objects", len(files_df))
-                
+
                 if 'FileName' in files_df.columns or 'Name' in files_df.columns:
                     name_col = 'FileName' if 'FileName' in files_df.columns else 'Name'
                     files_df['Extension'] = files_df[name_col].astype(str).str.extract(r'\.([^.]+)$')[0]
                     ext_counts = files_df['Extension'].value_counts().head(10)
-                    
+                        
                     fig_ext = px.bar(
                         x=ext_counts.index,
                         y=ext_counts.values,
@@ -1145,7 +1146,6 @@ with tab4:
                 col_chart, col_table = st.columns(2)
                 
                 with col_chart:
-                    import plotly.express as px
                     fig = px.pie(
                         names=list(state_counts.keys()),
                         values=list(state_counts.values()),
@@ -1180,7 +1180,6 @@ with tab4:
                     sorted_ips = sorted(external_ips.items(), key=lambda x: x[1], reverse=True)[:10]
                     ip_df = pd.DataFrame(sorted_ips, columns=['IP Address', 'Connections'])
                     
-                    import plotly.express as px
                     fig = px.bar(ip_df, x='IP Address', y='Connections', title='Top 10 External IPs')
                     fig.update_layout(template='plotly_dark', height=400)
                     st.plotly_chart(fig, use_container_width=True)
@@ -1196,7 +1195,7 @@ with tab4:
                     foreign = c.get('ForeignAddr', '')
                     if foreign and ':' in foreign:
                         ip = foreign.split(':')[0]
-                        if any(ip.startswith(prefix) for prefix in ['10.', '192.168.']) or                            any(ip.startswith(f'172.{i}.') for i in range(16, 32)):
+                        if any(ip.startswith(prefix) for prefix in ['10.', '192.168.']) or any(ip.startswith(f'172.{i}.') for i in range(16, 32)):
                             private_conns.append({
                                 'Local': c.get('LocalAddr'),
                                 'Remote': foreign,
@@ -1302,15 +1301,15 @@ with tab4:
             
             with col_sys1:
                 st.markdown("**Device Information**")
-                st.write(f"**Computer Name:** {metadata.get('computer_name', 'N/A')}")
-                st.write(f"**Username:** {metadata.get('username', 'N/A')}")
-                st.write(f"**OS Version:** {metadata.get('os_version', 'N/A')}")
+                st.write(f"* **Computer Name:** {metadata.get('computer_name', 'N/A')}")
+                st.write(f"* **Username:** {metadata.get('username', 'N/A')}")
+                st.write(f"* **OS Version:** {metadata.get('os_version', 'N/A')}")
             
             with col_sys2:
                 st.markdown("**Snapshot Details**")
-                st.write(f"**File Size:** {metadata.get('size_gb', 'N/A')} GB")
-                st.write(f"**Analysis Date:** {metadata.get('analysis_date', 'N/A')}")
-                st.write(f"**OS Type:** {metadata.get('os_type', 'N/A')}")
+                st.write(f"* **File Size:** {metadata.get('size_gb', 'N/A')} GB")
+                st.write(f"* **Analysis Date:** {metadata.get('analysis_time', 'N/A')}")
+                st.write(f"* **OS Type:** {metadata.get('os_type', 'N/A')}")
             
             st.markdown("---")
             
