@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#file_extractor.py
+# file_extractor.py
 import json
 import logging
 import subprocess
@@ -8,7 +8,6 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ class FileActivityResult:
     file_objects: Any = field(default_factory=list)
     recent_files: Any = field(default_factory=list)
     file_handles: Any = field(default_factory=list)
-    registry_activity: Any = field(default_factory=list)
+    registry_activity: Any = field(default_factory=dict)
     prefetch_data: Any = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -30,22 +29,10 @@ class FileActivityResult:
 
 
 def get_script_dir() -> Path:
-    """Get directory where this script is located."""
     return Path(__file__).resolve().parent
 
 
 class FileActivityExtractor:
-    """
-    Wraps Volatility 3 to extract file and activity artifacts from memory dumps.
-    
-    This extracts:
-    - File objects in memory
-    - Recent files accessed
-    - File handles by processes
-    - Registry activity (RecentDocs, UserAssist)
-    - Prefetch data
-    """
-
     def __init__(
         self,
         raw_path: str,
@@ -78,25 +65,12 @@ class FileActivityExtractor:
         if self.os_type not in ("windows", "linux"):
             self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows' or 'linux'.")
 
-    # ---------- Low-level Volatility wrapper ----------
-
     def _run_volatility(
         self,
         plugin: str,
         plugin_args: Optional[List[str]] = None,
         extra_global_args: Optional[List[str]] = None,
     ) -> Optional[Any]:
-        """
-        Run a Volatility 3 plugin and parse JSON output.
-
-        Args:
-            plugin: e.g. 'windows.filescan.FileScan'
-            plugin_args: extra args after plugin name
-            extra_global_args: extra args before plugin name
-
-        Returns:
-            Parsed JSON object (structure is Volatility's own), or None on failure.
-        """
         if plugin_args is None:
             plugin_args = []
         if extra_global_args is None:
@@ -115,7 +89,15 @@ class FileActivityExtractor:
             "-r",
             "json",
         ]
-        cmd.extend(extra_global_args)
+
+        # Inject Linux ISF — NO trailing spaces!
+        effective_extra_args = extra_global_args.copy()
+        if self.os_type == "linux":
+            has_isf = any(arg == "-u" for arg in effective_extra_args)
+            if not has_isf:
+                effective_extra_args = ["-u", "https://github.com/leludo84/vol3-linux-profiles/blob/main/banners-isf.json"] + effective_extra_args
+
+        cmd.extend(effective_extra_args)
         cmd.append(plugin)
         cmd.extend(plugin_args)
 
@@ -128,13 +110,8 @@ class FileActivityExtractor:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
-                timeout=300,  # 5 minute timeout for slow operations
+                # NO TIMEOUT
             )
-        except subprocess.TimeoutExpired:
-            msg = f"Volatility command timed out for plugin {plugin}"
-            logger.error(msg)
-            self.result.warnings.append(msg)
-            return None
         except Exception as e:
             msg = f"Failed to execute Volatility: {e}"
             logger.error(msg)
@@ -161,82 +138,89 @@ class FileActivityExtractor:
             data = json.loads(stdout)
             return data
         except json.JSONDecodeError as e:
-            msg = (
-                f"Failed to parse JSON from Volatility for plugin {plugin}: {e}. "
-                f"First 500 chars of stdout: {stdout[:500]!r}"
-            )
+            msg = f"Failed to parse JSON from Volatility for plugin {plugin}: {e}"
             logger.error(msg)
             self.result.warnings.append(msg)
             return None
 
-    # ---------- High-level artifact extractors ----------
-
     def extract_file_objects(self) -> Any:
         if self.os_type == "linux":
-            self.result.registry_activity = {}
-            self.result.prefetch_data = []
+            plugin = "linux.lsof.Lsof"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Linux file object extraction (lsof) failed.")
+                return []
+
+            entries = []
+            if isinstance(data, dict):
+                if "rows" in data:
+                    columns = data.get("columns", [])
+                    for row in data["rows"]:
+                        entry = dict(zip(columns, row))
+                        entries.append(entry)
+                elif "entries" in data:
+                    entries = data["entries"]
+                else:
+                    entries = list(data.values())
+            elif isinstance(data, list):
+                entries = data
+
+            normalized = []
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                normalized.append({
+                    "FileName": item.get("path", item.get("Path", "")),
+                    "PID": item.get("pid", item.get("PID", 0)),
+                    "FD": item.get("fd", item.get("FD", "")),
+                    "Type": item.get("type", item.get("Type", "")),
+                    "Offset": item.get("inode", item.get("Inode", "")),
+                    "Process": item.get("process", item.get("Process", "")),
+                })
+            return normalized
         else:
-            self.result.registry_activity = self.extract_registry_activity()
-            self.result.prefetch_data = self.extract_prefetch()
-        plugin = "windows.filescan.FileScan"
-        data = self._run_volatility(plugin)
-        if data is None:
-            self.result.warnings.append("File object extraction failed.")
-            return []
-        return data
+            plugin = "windows.filescan.FileScan"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("File object extraction failed.")
+                return []
+            return data
 
     def extract_file_handles(self) -> Any:
-        """
-        Extract file handles using windows.handles.Handles.
-        This shows which processes have open file handles.
-        """
         logger.info("Extracting file handles...")
         if self.os_type == "linux":
-            # lsof already shows open files per process
-            return self.extract_file_objects()  # reuse
+            return self.extract_file_objects()
         else:
             plugin = "windows.handles.Handles"
-            # Filter for File type handles
-            data = self._run_volatility(plugin, plugin_args=["--pid", "4"])  # System process often has many handles
-        if data is None:
-            self.result.warnings.append("File handle extraction failed.")
-            return []
-        
-        # Filter for file-type handles
-        if isinstance(data, list):
-            file_handles = [
-                item for item in data 
-                if isinstance(item, dict) and 
-                str(item.get("Type", "")).lower() in ["file", "key"]
-            ]
-            return file_handles
-        return data
+            data = self._run_volatility(plugin, plugin_args=["--pid", "4"])
+            if data is None:
+                self.result.warnings.append("File handle extraction failed.")
+                return []
+            if isinstance(data, list):
+                file_handles = [
+                    item for item in data
+                    if isinstance(item, dict) and str(item.get("Type", "")).lower() in ["file", "key"]
+                ]
+                return file_handles
+            return data
 
     def extract_registry_activity(self) -> Any:
-        """
-        Extract registry activity using multiple plugins:
-        - windows.registry.hivelist.HiveList (list registry hives)
-        - windows.registry.userassist.UserAssist (recent program execution)
-        """
+        if self.os_type == "linux":
+            return {}
         logger.info("Extracting registry activity...")
         registry_data = {}
-        
-        # Get hive list
         plugin = "windows.registry.hivelist.HiveList"
         hives = self._run_volatility(plugin)
         if hives:
             registry_data["hives"] = hives
         else:
             self.result.warnings.append("Registry hive list extraction failed.")
-        
-        # Get UserAssist data (recent program execution)
         plugin = "windows.registry.userassist.UserAssist"
         userassist = self._run_volatility(plugin)
         if userassist:
             registry_data["user_assist"] = userassist
         else:
             self.result.warnings.append("UserAssist extraction failed.")
-        
         return registry_data
 
     def extract_bash_history(self) -> Any:
@@ -244,75 +228,80 @@ class FileActivityExtractor:
             return []
         plugin = "linux.bash.Bash"
         data = self._run_volatility(plugin)
-        return data or []
+        if data is None:
+            return []
+
+        entries = []
+        if isinstance(data, dict):
+            if "rows" in data:
+                columns = data.get("columns", [])
+                for row in data["rows"]:
+                    entry = dict(zip(columns, row))
+                    entries.append(entry)
+            elif "entries" in data:
+                entries = data["entries"]
+            else:
+                entries = list(data.values())
+        elif isinstance(data, list):
+            entries = data
+
+        # Return list of command strings or full dicts
+        result = []
+        for e in entries:
+            if isinstance(e, dict):
+                cmd = e.get("Command", e.get("command", ""))
+                if cmd:
+                    result.append(cmd)
+            elif isinstance(e, str):
+                result.append(e)
+        return result
 
     def extract_recent_files(self) -> Any:
-        """
-        Extract recent files from registry and other sources.
-        Uses windows.registry.printkey.PrintKey to find RecentDocs.
-        """
         logger.info("Extracting recent files...")
         if self.os_type == "linux":
             return self.extract_bash_history()
         else:
-            # Try to extract RecentDocs from registry
             plugin = "windows.registry.printkey.PrintKey"
-            # Common path for recent documents
             recent_docs = self._run_volatility(
                 plugin,
                 plugin_args=["--key", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs"]
             )
-        if recent_docs is None:
-            self.result.warnings.append("Recent files extraction failed.")
-            return []
-        return recent_docs
+            if recent_docs is None:
+                self.result.warnings.append("Recent files extraction failed.")
+                return []
+            return recent_docs
 
     def extract_prefetch(self) -> Any:
-        """
-        Extract prefetch data if available.
-        Note: This may not be directly available in all memory dumps.
-        """
+        if self.os_type == "linux":
+            return []
         logger.info("Extracting prefetch data...")
-        # Prefetch data extraction is limited in memory forensics
-        # We'll try to find prefetch-related file objects
         plugin = "windows.filescan.FileScan"
         data = self._run_volatility(plugin)
-        
         if data and isinstance(data, list):
-            # Filter for .pf files (prefetch files)
             prefetch_files = [
                 item for item in data
-                if isinstance(item, dict) and
-                str(item.get("FileName", "")).lower().endswith(".pf")
+                if isinstance(item, dict) and str(item.get("FileName", "")).lower().endswith(".pf")
             ]
             return prefetch_files
-        
         self.result.warnings.append("Prefetch extraction limited - no .pf files found.")
         return []
 
-    # ---------- Orchestrator ----------
-
     def run(self) -> Dict[str, Any]:
-        """
-        Run all file/activity extraction steps and build the final result dict.
-        """
         if not Path(self.raw_path).exists() or not self.vol_script.exists():
             self.result.success = False
             return self.result.to_dict()
 
         logger.info("Starting file/activity artifact extraction for %s", self.raw_path)
 
-        # Extract all artifacts
         self.result.file_objects = self.extract_file_objects()
         self.result.file_handles = self.extract_file_handles()
         self.result.registry_activity = self.extract_registry_activity()
         self.result.recent_files = self.extract_recent_files()
         self.result.prefetch_data = self.extract_prefetch()
 
-        # Check if we got any data
         has_data = (
-            self.result.file_objects or 
-            self.result.file_handles or 
+            self.result.file_objects or
+            self.result.file_handles or
             self.result.registry_activity or
             self.result.recent_files or
             self.result.prefetch_data
@@ -323,91 +312,43 @@ class FileActivityExtractor:
             logger.info("File/activity extraction completed successfully")
         else:
             self.result.success = False
-            self.result.warnings.append(
-                "No file/activity artifacts extracted. "
-                "Image may be incompatible with Volatility 3 "
-                "(no kernel layer / symbol table discovered)."
-            )
-
+            self.result.warnings.append("No file/activity artifacts extracted.")
         return self.result.to_dict()
-
-
-# ---------- CLI entry point ----------
-
-def print_pretty_json(data: Dict[str, Any]) -> None:
-    print(json.dumps(data, indent=2, sort_keys=True))
 
 
 def main(argv: List[str]) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "File Activity Extractor: wraps Volatility 3 to obtain "
-            "file objects, handles, registry activity, and recent files from memory."
-        )
-    )
-    parser.add_argument(
-        "raw_file",
-        help="Path to raw memory dump (output_raw from parser.py)",
-    )
-    parser.add_argument(
-        "--os",
-        dest="os_type",
-        default="windows",
-        help="Guest OS type (currently only 'windows' is supported).",
-    )
-    parser.add_argument(
-        "--vol-path",
-        dest="vol_path",
-        default=None,
-        help="Path to Volatility 3 vol.py script. "
-             "Defaults to ./vol.py next to this script.",
-    )
-    parser.add_argument(
-        "--output",
-        dest="output_json",
-        default=None,
-        help="Optional path to save extraction result as JSON. "
-             "If omitted, a default '<raw_stem>_file_activity.json' will be created "
-             "in the output/ folder.",
-    )
-    parser.add_argument(
-        "--session", 
-        help="Session directory from vast.py"
-    )
+    parser = argparse.ArgumentParser(description="File Activity Extractor")
+    parser.add_argument("raw_file", help="Path to raw memory dump")
+    parser.add_argument("--os", default="windows", help="Guest OS type")
+    parser.add_argument("--vol-path", default=None, help="Path to vol.py")
+    parser.add_argument("--output", default=None, help="Output JSON path")
+    parser.add_argument("--session", help="Session directory")
 
     args = parser.parse_args(argv)
 
     extractor = FileActivityExtractor(
         raw_path=args.raw_file,
-        os_type=args.os_type,
+        os_type=args.os,
         vol_script=args.vol_path,
     )
     result = extractor.run()
 
-    # Auto-generate output filename if not provided
-    if args.output_json:
-        out_path = Path(args.output_json).resolve()
+    if args.output:
+        out_path = Path(args.output).resolve()
     else:
-        # Create output directory if it doesn't exist
-        if args.session:
-            output_dir = Path(args.session) / "extracted_files"
-        else:
-            output_dir = get_script_dir() / "output" / "extracted_files"
-
+        output_dir = Path(args.session) / "extracted_files" if args.session else get_script_dir() / "output" / "extracted_files"
         output_dir.mkdir(parents=True, exist_ok=True)
-        
         raw_path = Path(args.raw_file).resolve()
         out_path = output_dir / f"{raw_path.stem}_file_activity.json"
 
     out_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     logger.info("File/activity extraction result written to %s", out_path)
 
-    # Print summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("FILE/ACTIVITY EXTRACTION SUMMARY")
-    print("="*60)
+    print("=" * 60)
     print(f"Success: {result.get('success', False)}")
     print(f"Input: {result.get('input_raw', 'N/A')}")
     print(f"Output: {out_path}")
@@ -417,12 +358,12 @@ def main(argv: List[str]) -> int:
     print(f"  - Registry Data: {len(result.get('registry_activity', {}))}")
     print(f"  - Recent Files: {len(result.get('recent_files', []))}")
     print(f"  - Prefetch Files: {len(result.get('prefetch_data', []))}")
-    
+
     if result.get('warnings'):
         print(f"\nWarnings ({len(result['warnings'])}):")
         for warning in result['warnings']:
             print(f" [WARNING] {warning}")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     return 0 if result.get("success", False) else 1
 

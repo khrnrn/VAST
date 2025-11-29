@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#memory_extractor.py
+# memory_extractor.py
 import json
 import logging
 import subprocess
@@ -8,7 +8,6 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -27,19 +26,10 @@ class MemoryExtractionResult:
 
 
 def get_script_dir() -> Path:
-    """Get directory where this script is located."""
     return Path(__file__).resolve().parent
 
 
 class MemoryArtifactExtractor:
-    """
-    Wraps Volatility 3 to extract memory artifacts (processes, network sockets).
-
-    This assumes Volatility 3's `vol.py` is available either:
-      - In the same folder as this script, or
-      - At a custom path passed into the constructor.
-    """
-
     def __init__(
         self,
         raw_path: str,
@@ -72,32 +62,18 @@ class MemoryArtifactExtractor:
         if self.os_type not in ("windows", "linux"):
             self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows' or 'linux'.")
 
-    # ---------- Low-level Volatility wrapper ----------
-
     def _run_volatility(
         self,
         plugin: str,
         plugin_args: Optional[List[str]] = None,
         extra_global_args: Optional[List[str]] = None,
     ) -> Optional[Any]:
-        """
-        Run a Volatility 3 plugin and parse JSON output.
-
-        Args:
-            plugin: e.g. 'windows.pslist.PsList' or 'windows.netscan.NetScan'
-            plugin_args: extra args after plugin name, e.g. ['--pid', '4']
-            extra_global_args: extra args before plugin name, e.g. ['-r', 'json']
-
-        Returns:
-            Parsed JSON object (structure is Volatility's own), or None on failure.
-        """
         if plugin_args is None:
             plugin_args = []
         if extra_global_args is None:
             extra_global_args = []
 
         if not Path(self.raw_path).exists() or not self.vol_script.exists():
-            # Warnings already recorded in __init__
             return None
 
         python_exec = sys.executable
@@ -110,7 +86,15 @@ class MemoryArtifactExtractor:
             "-r",
             "json",
         ]
-        cmd.extend(extra_global_args)
+
+        # Inject Linux ISF if needed — NO trailing spaces!
+        effective_extra_args = extra_global_args.copy()
+        if self.os_type == "linux":
+            has_isf = any(arg == "-u" for arg in effective_extra_args)
+            if not has_isf:
+                effective_extra_args = ["-u", "https://github.com/leludo84/vol3-linux-profiles/blob/main/banners-isf.json"] + effective_extra_args
+
+        cmd.extend(effective_extra_args)
         cmd.append(plugin)
         cmd.extend(plugin_args)
 
@@ -123,6 +107,7 @@ class MemoryArtifactExtractor:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
+                # NO TIMEOUT
             )
         except Exception as e:
             msg = f"Failed to execute Volatility: {e}"
@@ -150,15 +135,10 @@ class MemoryArtifactExtractor:
             data = json.loads(stdout)
             return data
         except json.JSONDecodeError as e:
-            msg = (
-                f"Failed to parse JSON from Volatility for plugin {plugin}: {e}. "
-                f"First 500 chars of stdout: {stdout[:500]!r}"
-            )
+            msg = f"Failed to parse JSON from Volatility for plugin {plugin}: {e}"
             logger.error(msg)
             self.result.warnings.append(msg)
             return None
-
-    # ---------- High-level artifact extractors ----------
 
     def extract_processes(self) -> Any:
         if self.os_type == "linux":
@@ -167,21 +147,36 @@ class MemoryArtifactExtractor:
             if data is None:
                 self.result.warnings.append("Process extraction failed.")
                 return []
-            # Normalize to Windows-like schema
+
+            # Handle {"rows": [...], "columns": [...]} format
+            entries = []
+            if isinstance(data, dict):
+                if "rows" in data:
+                    columns = data.get("columns", [])
+                    for row in data["rows"]:
+                        entry = dict(zip(columns, row))
+                        entries.append(entry)
+                elif "entries" in data:
+                    entries = data["entries"]
+                else:
+                    entries = list(data.values())  # fallback
+            elif isinstance(data, list):
+                entries = data
+
             normalized = []
-            entries = data.get("entries", []) if isinstance(data, dict) else data
             for p in entries:
                 if not isinstance(p, dict):
                     continue
                 normalized.append({
-                    "PID": p.get("pid"),
-                    "ImageFileName": p.get("comm", ""),
-                    "PPID": p.get("ppid"),
-                    "ImagePath": "",  # Not available in pslist
-                    "CommandLine": "",  # Not available here
+                    "PID": p.get("PID") or p.get("pid", 0),
+                    "ImageFileName": p.get("COMM") or p.get("comm", "unknown"),
+                    "PPID": p.get("PPID") or p.get("ppid", 0),
+                    "ImagePath": p.get("executable", ""),
+                    "CommandLine": "",
                     "Threads": p.get("num_threads", 0),
                     "Wow64": False,
                     "SessionId": None,
+                    "User": p.get("uid", "Unknown"),
                 })
             return normalized
         else:
@@ -200,48 +195,36 @@ class MemoryArtifactExtractor:
                 self.result.warnings.append("Network connection extraction failed.")
                 return []
 
-            normalized = []
-            entries = data.get("entries", []) if isinstance(data, dict) else data
+            entries = []
+            if isinstance(data, dict):
+                if "rows" in data:
+                    columns = data.get("columns", [])
+                    for row in data["rows"]:
+                        entry = dict(zip(columns, row))
+                        entries.append(entry)
+                elif "entries" in data:
+                    entries = data["entries"]
+                else:
+                    entries = list(data.values())
+            elif isinstance(data, list):
+                entries = data
 
+            normalized = []
             for sock in entries:
                 if not isinstance(sock, dict):
                     continue
-
-                # Extract key fields (sockstat gives per-socket stats)
-                protocol = sock.get("protocol", "").upper()
-                family = sock.get("family", "").upper()
-                state = sock.get("state", "")
-                local_addr = sock.get("local_address", "")
-                local_port = sock.get("local_port")
-                remote_addr = sock.get("remote_address", "")
-                remote_port = sock.get("remote_port")
-
-                # Normalize protocol name (e.g., "INET" → "TCP"/"UDP")
-                # Note: sockstat doesn't distinguish TCP/UDP directly; you may need linux.netstat if available
-                # For now, assume INET = TCP (common heuristic)
-                if family == "AF_INET":
-                    proto = "TCP" if state else "UDP"
-                elif family == "AF_INET6":
-                    proto = "TCP6" if state else "UDP6"
-                else:
-                    proto = "UNKNOWN"
-
                 normalized.append({
-                    "Proto": proto,
-                    "LocalAddr": str(local_addr) if local_addr else "0.0.0.0",
-                    "LocalPort": local_port if local_port is not None else 0,
-                    "ForeignAddr": str(remote_addr) if remote_addr else "0.0.0.0",
-                    "ForeignPort": remote_port if remote_port is not None else 0,
-                    "State": state if state else ("ESTABLISHED" if remote_addr else "LISTENING"),
-                    # Add dummy fields for compatibility
-                    "PID": sock.get("pid", 0),
-                    "Owner": sock.get("process", ""),
+                    "Proto": sock.get("Protocol", "TCP"),
+                    "LocalAddr": str(sock.get("LocalAddr", "0.0.0.0")),
+                    "LocalPort": int(sock.get("LocalPort", 0)),
+                    "ForeignAddr": str(sock.get("ForeignAddr", "0.0.0.0")),
+                    "ForeignPort": int(sock.get("ForeignPort", 0)),
+                    "State": sock.get("State", "UNKNOWN"),
+                    "PID": sock.get("PID") or sock.get("pid", 0),
+                    "Owner": sock.get("Process") or sock.get("process", ""),
                 })
-
             return normalized
-
         else:
-            # Windows path
             plugin = "windows.netscan.NetScan"
             data = self._run_volatility(plugin)
             if data is None:
@@ -249,12 +232,7 @@ class MemoryArtifactExtractor:
                 return []
             return data
 
-    # ---------- Orchestrator ----------
-
     def run(self) -> Dict[str, Any]:
-        """
-        Run all extraction steps and build the final result dict.
-        """
         if not Path(self.raw_path).exists() or not self.vol_script.exists():
             self.result.success = False
             return self.result.to_dict()
@@ -268,79 +246,33 @@ class MemoryArtifactExtractor:
             self.result.success = True
         else:
             self.result.success = False
-            self.result.warnings.append(
-                "No processes or connections extracted. "
-                "Image may be incompatible with Volatility 3 "
-                "(no kernel layer / symbol table discovered)."
-            )
-
+            self.result.warnings.append("No processes or connections extracted.")
         return self.result.to_dict()
-
-
-# ---------- CLI entry point for standalone testing ----------
-
-def print_pretty_json(data: Dict[str, Any]) -> None:
-    print(json.dumps(data, indent=2, sort_keys=True))
 
 
 def main(argv: List[str]) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Memory Artifact Extractor: wraps Volatility 3 to obtain "
-            "process and network artifacts from a raw memory dump."
-        )
-    )
-    parser.add_argument(
-        "raw_file",
-        help="Path to raw memory dump (output_raw from parser.py)",
-    )
-    parser.add_argument(
-        "--os",
-        dest="os_type",
-        default="windows",
-        help="Guest OS type (currently only 'windows' is supported).",
-    )
-    parser.add_argument(
-        "--vol-path",
-        dest="vol_path",
-        default=None,
-        help="Path to Volatility 3 vol.py script. "
-             "Defaults to ./vol.py next to this script.",
-    )
-    parser.add_argument(
-        "--output",
-        dest="output_json",
-        default=None,
-        help="Optional path to save extraction result as JSON. "
-             "If omitted, a default '<raw_stem>_extracted.json' will be created "
-             "next to the raw file.",
-    )
-
-    parser.add_argument(
-        "--session",
-        help="Session directory (from vast.py)"
-    )
+    parser = argparse.ArgumentParser(description="Memory Artifact Extractor")
+    parser.add_argument("raw_file", help="Path to raw memory dump")
+    parser.add_argument("--os", default="windows", help="Guest OS type")
+    parser.add_argument("--vol-path", default=None, help="Path to vol.py")
+    parser.add_argument("--output", default=None, help="Output JSON path")
+    parser.add_argument("--session", help="Session directory")
 
     args = parser.parse_args(argv)
 
     extractor = MemoryArtifactExtractor(
         raw_path=args.raw_file,
-        os_type=args.os_type,
+        os_type=args.os,
         vol_script=args.vol_path,
     )
     result = extractor.run()
 
-    # Auto-generate output filename if not provided
-    if args.output_json:
-        out_path = Path(args.output_json).resolve()
+    if args.output:
+        out_path = Path(args.output).resolve()
     else:
-        if args.session:
-            output_dir = Path(args.session) / "extracted_memory"
-        else:
-            output_dir = get_script_dir() / "output" / "extracted_memory"
-
+        output_dir = Path(args.session) / "extracted_memory" if args.session else get_script_dir() / "output" / "extracted_memory"
         output_dir.mkdir(parents=True, exist_ok=True)
         raw_path = Path(args.raw_file).resolve()
         out_path = output_dir / f"{raw_path.stem}_memory.json"
