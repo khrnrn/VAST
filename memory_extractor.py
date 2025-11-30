@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# memory_extractor.py
 import json
 import logging
 import subprocess

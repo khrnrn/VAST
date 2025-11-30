@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# file_extractor.py
 import json
 import logging
 import subprocess

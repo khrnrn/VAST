@@ -169,9 +169,15 @@ class AutomatedAnalyzer:
             sys.executable,
             str(self.vol_script),
             "-f", str(self.raw_path),
-            "-r", "json",
             plugin
         ] + plugin_args
+        
+        # Add symbol files for macOS
+        if "mac." in plugin or "banners" in plugin.lower():
+            cmd.insert(4, "-u")
+            cmd.insert(5, "https://github.com/Abyss-W4tcher/volatility3-symbols/raw/master/banners/banners.json")
+        
+        logger.info(f"Running Volatility: {' '.join(cmd)}")
         
         try:
             result = subprocess.run(
@@ -184,44 +190,333 @@ class AutomatedAnalyzer:
             )
             
             if result.returncode != 0:
+                logger.warning(f"Volatility command failed: {result.stderr}")
                 return None
             
-            return json.loads(result.stdout.strip()) if result.stdout.strip() else None
+            output = result.stdout.strip()
+            if not output:
+                return None
+            
+            # Parse text output from banners plugin
+            if "banners" in plugin.lower():
+                return self._parse_banners_text(output)
+            
+            # For other plugins, try to parse as JSON if possible
+            try:
+                return json.loads(output)
+            except json.JSONDecodeError:
+                # Return raw text if not JSON
+                logger.warning(f"Could not parse JSON, returning raw text")
+                return {"raw_output": output}
+                
         except Exception as e:
             logger.error(f"Volatility command failed: {e}")
             return None
+        
+    def _parse_banners_text(self, output: str) -> List[Dict[str, Any]]:
+        """Parse text output from banners.Banners plugin."""
+        banners = []
+        lines = output.split('\n')
+        
+        # Skip header lines (Volatility 3 Framework, Progress, Offset/Banner header)
+        data_started = False
+        for line in lines:
+            line = line.strip()
+            
+            # Skip empty lines and headers
+            if not line or "Volatility" in line or "Progress:" in line or line.startswith("Offset"):
+                continue
+            
+            # Skip the header separator line
+            if line.startswith("---") or line == "Banner":
+                data_started = True
+                continue
+            
+            if data_started and line:
+                # Split by whitespace, first part is offset, rest is banner
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    offset = parts[0]
+                    banner = parts[1]
+                    
+                    # Only add Darwin kernel banners
+                    if "Darwin" in banner and "Kernel" in banner:
+                        banners.append({
+                            "Offset": offset,
+                            "Banner": banner
+                        })
+        
+        logger.info(f"Parsed {len(banners)} Darwin banners from text output")
+        return banners
     
     def analyze_system_info(self):
-        """Extract basic system information."""
-        logger.info("Analyzing system information...")
-        
-        # Get system info from windows.info plugin
-        info_data = self._run_volatility("windows.info.Info")
-        
-        if info_data:
-            self.analysis_results["system_info"] = {
-                "plugin_output": info_data
-            }
-        
-        # Extract computer name from registry
-        env_data = self._run_volatility(
-            "windows.envars.Envars"
-        )
-        
-        if env_data and isinstance(env_data, list):
-            usernames_set = set()  # Use set to avoid duplicates
-            for entry in env_data:
-                if isinstance(entry, dict):
-                    var_name = entry.get("Variable", "")
-                    if var_name == "COMPUTERNAME":
-                        self.analysis_results["system_info"]["computer_name"] = entry.get("Value", "Unknown")
-                    elif var_name == "USERNAME":
-                        username = entry.get("Value")
-                        if username:
-                            usernames_set.add(username)
-        
-            # Convert set to sorted list
-            self.analysis_results["system_info"]["usernames"] = sorted(list(usernames_set))
+            """Extract basic system information - NOW SUPPORTS WINDOWS, LINUX, AND MACOS."""
+            logger.info("Analyzing system information...")
+            
+            # Determine OS type from the raw memory file path or memory extraction results
+            os_type = "unknown"
+            
+            # Try to detect OS type from memory extraction results
+            try:
+                with open(self.memory_json, "r") as f:
+                    mem_data = json.load(f)
+                    os_type = mem_data.get("os_type", "unknown").lower()
+            except Exception:
+                pass
+            
+            logger.info(f"Detected OS type: {os_type}")
+            
+            # === WINDOWS SYSTEM INFO ===
+            if os_type == "windows":
+                # Get system info from windows.info plugin
+                info_data = self._run_volatility("windows.info.Info")
+                
+                if info_data:
+                    self.analysis_results["system_info"] = {
+                        "plugin_output": info_data
+                    }
+                
+                # Extract computer name and usernames from registry
+                env_data = self._run_volatility("windows.envars.Envars")
+                
+                if env_data and isinstance(env_data, list):
+                    usernames_set = set()
+                    for entry in env_data:
+                        if isinstance(entry, dict):
+                            var_name = entry.get("Variable", "")
+                            if var_name == "COMPUTERNAME":
+                                self.analysis_results["system_info"]["computer_name"] = entry.get("Value", "Unknown")
+                            elif var_name == "USERNAME":
+                                username = entry.get("Value")
+                                if username:
+                                    usernames_set.add(username)
+                    
+                    self.analysis_results["system_info"]["usernames"] = sorted(list(usernames_set))
+            
+            # === LINUX SYSTEM INFO ===
+            elif os_type == "linux":
+                logger.info("Extracting Linux system information...")
+                
+                # Get hostname from linux.hostname plugin (if available)
+                # Note: This plugin may not exist in all Volatility 3 versions
+                hostname = "Unknown"
+                
+                # Try to extract hostname from bash history or process command lines
+                bash_data = self._run_volatility("linux.bash.Bash")
+                if bash_data:
+                    # Look for hostname in bash commands
+                    for entry in bash_data if isinstance(bash_data, list) else []:
+                        if isinstance(entry, dict):
+                            cmd = entry.get("Command", "")
+                            if "hostname" in cmd.lower():
+                                # Try to extract hostname from command output
+                                parts = cmd.split()
+                                if len(parts) > 1:
+                                    hostname = parts[1]
+                                    break
+                
+                # Get kernel version from memory extraction data
+                os_version = "Linux"
+                try:
+                    with open(self.memory_json, "r") as f:
+                        mem_data = json.load(f)
+                        # Check if there's kernel info in processes
+                        processes = mem_data.get("processes", [])
+                        if processes:
+                            # Look for kernel version in first process or system info
+                            os_version = "Linux (Kernel detected)"
+                except Exception:
+                    pass
+                
+                # Extract usernames from process user IDs
+                usernames_set = set()
+                try:
+                    with open(self.memory_json, "r") as f:
+                        mem_data = json.load(f)
+                        processes = mem_data.get("processes", [])
+                        
+                        for proc in processes:
+                            user = proc.get("User") or proc.get("user") or proc.get("UID") or proc.get("uid")
+                            if user and str(user).isdigit():
+                                # UID - try to map common UIDs to usernames
+                                uid = int(user)
+                                if uid >= 1000:  # Regular user UIDs typically start at 1000
+                                    # Extract from process paths
+                                    path = str(proc.get("ImagePath", ""))
+                                    if "/home/" in path:
+                                        username = path.split("/home/")[1].split("/")[0]
+                                        if username:
+                                            usernames_set.add(username)
+                            elif user and not str(user).isdigit():
+                                # Username directly available
+                                if user not in ["root", "daemon", "bin", "sys"]:
+                                    usernames_set.add(user)
+                except Exception as e:
+                    logger.warning(f"Could not extract Linux usernames: {e}")
+                
+                self.analysis_results["system_info"] = {
+                    "computer_name": hostname,
+                    "hostname": hostname,
+                    "os_version": os_version,
+                    "usernames": sorted(list(usernames_set)),
+                    "plugin_output": []  # Linux doesn't have the same plugin output structure
+                }
+            
+            # === MACOS SYSTEM INFO ===
+            elif os_type == "macos":
+                logger.info("Extracting macOS system information...")
+                
+                hostname = "Unknown"
+                os_version = "macOS"
+                architecture = "Unknown"
+                
+                # Try to get OS version from banners plugin
+                try:
+                    banners_data = self._run_volatility("banners.Banners")
+                    logger.info(f"Banners data received: {banners_data}")
+                    
+                    if banners_data and isinstance(banners_data, list):
+                        # Find the first Darwin kernel banner
+                        for entry in banners_data:
+                            if isinstance(entry, dict):
+                                banner_text = entry.get("Banner", "")
+                                
+                                if banner_text and "Darwin" in banner_text and "Kernel" in banner_text:
+                                    logger.info(f"Found Darwin banner: {banner_text}")
+                                    
+                                    try:
+                                        # Extract Darwin version number
+                                        # Format: "Darwin Kernel Version 19.6.0: ..."
+                                        if "Darwin Kernel Version" in banner_text:
+                                            version_part = banner_text.split("Version ")[1].split(":")[0].strip()
+                                            darwin_ver = version_part.split(".")[0]
+                                            darwin_major = int(darwin_ver)
+                                            
+                                            logger.info(f"Parsed Darwin version: {darwin_major}")
+                                            
+                                            # Map Darwin version to macOS version
+                                            version_map = {
+                                                23: "macOS 14 Sonoma",
+                                                22: "macOS 13 Ventura",
+                                                21: "macOS 12 Monterey",
+                                                20: "macOS 11 Big Sur",
+                                                19: "macOS 10.15 Catalina",
+                                                18: "macOS 10.14 Mojave",
+                                                17: "macOS 10.13 High Sierra",
+                                                16: "macOS 10.12 Sierra",
+                                                15: "macOS 10.11 El Capitan",
+                                                14: "macOS 10.10 Yosemite",
+                                            }
+                                            
+                                            macos_name = version_map.get(darwin_major, f"macOS (Darwin {darwin_major})")
+                                            
+                                            # Extract architecture from banner
+                                            if "X86_64" in banner_text or "x86_64" in banner_text:
+                                                architecture = "x64"
+                                            elif "ARM64" in banner_text or "arm64" in banner_text:
+                                                architecture = "ARM64"
+                                            else:
+                                                architecture = "Unknown"
+                                            
+                                            os_version = f"{macos_name} (Darwin {version_part})"
+                                            logger.info(f"Successfully mapped to: {os_version}, Architecture: {architecture}")
+                                            break
+                                            
+                                    except (IndexError, ValueError) as e:
+                                        logger.warning(f"Could not parse Darwin version from banner: {e}")
+                                        os_version = banner_text
+                    else:
+                        logger.warning(f"Banners data is not in expected format: {type(banners_data)}")
+                        
+                except Exception as e:
+                    logger.error(f"Could not get banners data: {e}", exc_info=True)
+                
+                # Extract usernames from process data
+                usernames_set = set()
+                hostname_candidates = set()
+                
+                try:
+                    with open(self.memory_json, "r") as f:
+                        mem_data = json.load(f)
+                        processes = mem_data.get("processes", [])
+                        
+                        logger.info(f"Checking {len(processes)} macOS processes for username extraction")
+                        
+                        # Look for user-specific processes
+                        for proc in processes:
+                            proc_name = str(proc.get("ImageFileName", "") or proc.get("comm", "") or proc.get("COMM", "") or proc.get("NAME", ""))
+                            
+                            # User-specific processes
+                            if any(app in proc_name.lower() for app in ["finder", "dock", "safari", "loginwindow", "windowserver"]):
+                                user_field = (proc.get("User") or proc.get("user") or 
+                                            proc.get("UID") or proc.get("uid") or 
+                                            proc.get("OWNER") or proc.get("owner"))
+                                
+                                if user_field:
+                                    user_str = str(user_field)
+                                    
+                                    # Handle "user@hostname" format
+                                    if "@" in user_str:
+                                        username, host = user_str.split("@", 1)
+                                        usernames_set.add(username)
+                                        hostname_candidates.add(host)
+                                    # Handle numeric UIDs (macOS user UIDs >= 501)
+                                    elif user_str.isdigit():
+                                        uid_num = int(user_str)
+                                        if uid_num >= 501:
+                                            usernames_set.add(f"user{uid_num}")
+                                    # Handle direct username
+                                    elif user_str not in ["root", "daemon", "nobody", "_unknown", "0"]:
+                                        usernames_set.add(user_str)
+                        
+                        # Try to find hostname from network info
+                        connections = mem_data.get("connections", [])
+                        for conn in connections[:20]:
+                            local_addr = str(conn.get("LocalAddr", ""))
+                            if local_addr and not local_addr[0].isdigit() and local_addr not in ["localhost", "*", ""]:
+                                hostname_candidates.add(local_addr.split(".")[0])
+                        
+                except Exception as e:
+                    logger.warning(f"Could not extract macOS usernames from memory JSON: {e}")
+                
+                # Set usernames
+                if usernames_set:
+                    usernames_list = sorted(list(usernames_set))
+                    logger.info(f"Successfully extracted {len(usernames_list)} username(s): {usernames_list}")
+                else:
+                    usernames_list = ["macuser"]
+                    logger.warning("No usernames extracted, using default 'macuser'")
+                
+                # Set hostname
+                if hostname_candidates:
+                    hostname = sorted(list(hostname_candidates))[0]
+                    logger.info(f"Using hostname: {hostname}")
+                else:
+                    hostname = "Mac"
+                    logger.warning("No hostname found, using default 'Mac'")
+                
+                logger.info(f"macOS extraction complete - hostname: {hostname}, users: {usernames_list}, os: {os_version}, arch: {architecture}")
+                
+                self.analysis_results["system_info"] = {
+                    "computer_name": hostname,
+                    "hostname": hostname,
+                    "os_version": os_version,
+                    "usernames": usernames_list,
+                    "plugin_output": [],
+                    "architecture": architecture
+                }
+            
+            
+            # === FALLBACK FOR UNKNOWN OS ===
+            else:
+                logger.warning(f"Unknown OS type: {os_type}. Using fallback extraction.")
+                self.analysis_results["system_info"] = {
+                    "computer_name": "Unknown",
+                    "hostname": "Unknown", 
+                    "os_version": "Unknown",
+                    "usernames": [],
+                    "plugin_output": []
+                }
     
     def analyze_processes(self):
         """Analyze process information from extraction JSON."""
@@ -254,7 +549,7 @@ class AutomatedAnalyzer:
                     if p.get("ImageFileName", "").lower() in 
                     ["cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe"]]
             
-            # Build results dictionary - FIXED
+            # Build results dictionary
             self.analysis_results["process_analysis"] = {
                 "all_processes": processes,  # Store all processes for later use
                 "total_processes": len(processes),
@@ -490,7 +785,6 @@ class AutomatedAnalyzer:
         logger.info("Generating summary...")
 
         # Start from whatever analyze_system_info() already collected
-        # (keeps plugin_output so dashboard OS detection still works)
         sys_info = self.analysis_results.get("system_info", {}).copy()
 
         # 1. Computer name
@@ -562,7 +856,18 @@ class AutomatedAnalyzer:
             }
         }
 
+        # add MITRE techniques into the summary
+        suspicious_procs = self.analysis_results["process_analysis"].get("suspicious_processes", [])
+        mitre_hits = sorted(list({
+            MITRE_MAP.get(p.get("name", "").lower())
+            for p in suspicious_procs
+            if p.get("name", "").lower() in MITRE_MAP
+        }))
+        # keep only non-None strings
+        summary["threats"]["mitre_techniques"] = [h for h in mitre_hits if h]
+
         self.analysis_results["summary"] = summary
+
     
     def run_analysis(self) -> Dict[str, Any]:
         """Run complete automated analysis."""
@@ -787,6 +1092,11 @@ def main(argv: List[str]) -> int:
     parser.add_argument(
         "file_json",
         help="Path to file extraction JSON"
+    )
+    parser.add_argument(
+        "--os",
+        default="windows",
+        help="Operating system type (windows/linux/macos)"  # ← ADD THIS
     )
     parser.add_argument(
         "--vol-path",

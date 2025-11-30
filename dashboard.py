@@ -1,14 +1,14 @@
-# dashboard.py - VAST Memory Forensics Dashboard (MERGED v3.0)
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import json
-import os
 import sys
 from pathlib import Path
 import tempfile
+from vast_integration import VASTAnalyzer, run_analysis
+from automated_analysis import generate_text_report, MITRE_MAP
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -40,13 +40,16 @@ st.markdown("**Advanced Memory Forensics Dashboard**")
 st.markdown("---")
 
 # Initialize session state
-for key in ['analysis_complete', 'analysis_results', 'session_dir', 'search_query', 'os_type', 'snapshot_info']:
+for key in [
+    'analysis_complete', 'analysis_results', 'session_dir',
+    'search_query', 'os_type', 'snapshot_info', 'automated_results'
+]:
     if key not in st.session_state:
         st.session_state[key] = False if key == 'analysis_complete' else (None if key != 'search_query' else "")
 
-# ========================
-# METADATA EXTRACTION FUNCTION (FROM V2 - WORKING!)
-# ========================
+# ==============================================
+# METADATA EXTRACTION FUNCTION
+# ==============================================
 def extract_snapshot_metadata(display_results, automated_results=None):
     """Extract metadata for Windows, Linux, and macOS"""
     metadata = {
@@ -65,7 +68,7 @@ def extract_snapshot_metadata(display_results, automated_results=None):
 
     sys_info = automated_results.get("system_info", {})
 
-    # === COMPUTER NAME ===
+    # === COMPUTER NAME / HOSTNAME ===
     metadata['computer_name'] = sys_info.get("computer_name") or sys_info.get("hostname", "Unknown")
 
     # === ARCHITECTURE ===
@@ -77,7 +80,7 @@ def extract_snapshot_metadata(display_results, automated_results=None):
     elif sys_info.get("Is64Bit") is not None:
         metadata['architecture'] = "x64" if sys_info["Is64Bit"] else "x86"
 
-    # === USERNAME (SMART FILTERING) ===
+    # === USERNAME EXTRACTION (OS-AWARE) ===
     usernames = []
     if sys_info.get("usernames"):
         usernames = sys_info["usernames"]
@@ -98,15 +101,26 @@ def extract_snapshot_metadata(display_results, automated_results=None):
     if real_users:
         metadata['username'] = real_users[0]
     else:
-        # Fallback: parse from process paths
+        # Fallback: parse from process paths (OS-aware)
         for p in display_results.get("processes", []):
-            path = str(p.get("ImagePath") or p.get("ImageFileName") or p.get("comm", "") or "")
+            path = str(p.get("ImagePath") or p.get("path") or p.get("ImageFileName") or p.get("comm", "") or "")
             path = path.lower()
-            if "/home/" in path:
+
+            # macOS: /Users/username/...
+            if "/users/" in path:
+                parts = path.split("/users/")
+                if len(parts) > 1:
+                    username = parts[1].split("/")[0]
+                    if username and username not in ["public", "shared", "guest", "daemon"]:
+                        metadata["username"] = username.capitalize()
+                        break
+            # Linux: /home/username/...
+            elif "/home/" in path:
                 username = path.split("/home/")[1].split("/")[0]
                 if username and username not in ["", "root"]:
                     metadata['username'] = username
                     break
+            # Windows: C:\Users\username\...
             elif "\\users\\" in path:
                 parts = path.split("\\users\\")
                 if len(parts) > 1:
@@ -114,6 +128,42 @@ def extract_snapshot_metadata(display_results, automated_results=None):
                     if username not in ["public", "default", "all users"]:
                         metadata['username'] = username.capitalize()
                         break
+            
+            # Try User/UID field directly (especially for macOS)
+            if metadata['username'] == 'Unknown':
+                user_field = p.get("User") or p.get("user") or p.get("UID") or p.get("uid")
+                if user_field and isinstance(user_field, str):
+                    # macOS might have format like "501" or "username" or "username@hostname"
+                    if "@" in user_field:
+                        username = user_field.split("@")[0]
+                    else:
+                        username = user_field
+                    
+                    # Skip if it's just a UID number or system account
+                    if username and not username.isdigit() and username not in system_accounts:
+                        metadata["username"] = username.capitalize()
+                        break
+
+    # === HOSTNAME FROM PROCESSES (macOS/Linux fallback) ===
+    if metadata['computer_name'] == 'Unknown':
+        for p in display_results.get("processes", []):
+            proc_name = str(p.get("ImageFileName") or p.get("comm") or p.get("NAME") or p.get("name", "")).lower()
+            
+            # macOS specific processes
+            if proc_name in ["loginwindow", "finder", "dock", "windowserver"]:
+                uid_field = p.get("User") or p.get("user") or p.get("UID") or p.get("uid")
+                if uid_field and isinstance(uid_field, str) and "@" in uid_field:
+                    hostname = uid_field.split("@")[1]
+                    metadata['computer_name'] = hostname
+                    break
+        
+        # Try network hostname
+        if metadata['computer_name'] == 'Unknown':
+            for conn in display_results.get("connections", []):
+                local_addr = str(conn.get("LocalAddr", ""))
+                if local_addr and not any(c.isdigit() for c in local_addr[:3]) and local_addr not in ["localhost", "", "0.0.0.0"]:
+                    metadata['computer_name'] = local_addr.split(".")[0]
+                    break
 
     # === OS VERSION ===
     plugin_output = sys_info.get("plugin_output", [])
@@ -141,7 +191,27 @@ def extract_snapshot_metadata(display_results, automated_results=None):
         kernel_line = next((item['Value'] for item in plugin_output 
                         if "Darwin Kernel" in str(item.get('Value', ''))), "")
         if kernel_line:
-            metadata['os_version'] = kernel_line.strip()
+            try:
+                darwin_version = kernel_line.split("Version ")[1].split(".")[0]
+                darwin_major = int(darwin_version)
+                
+                # Map Darwin version to macOS version
+                if darwin_major >= 20:
+                    macos_version = f"macOS {darwin_major - 9} ({kernel_line.split(':')[0]})"
+                elif darwin_major == 19:
+                    macos_version = "macOS 10.15 Catalina"
+                elif darwin_major == 18:
+                    macos_version = "macOS 10.14 Mojave"
+                elif darwin_major == 17:
+                    macos_version = "macOS 10.13 High Sierra"
+                elif darwin_major == 16:
+                    macos_version = "macOS 10.12 Sierra"
+                else:
+                    macos_version = f"macOS (Darwin {darwin_major})"
+                
+                metadata['os_version'] = macos_version
+            except (IndexError, ValueError):
+                metadata['os_version'] = kernel_line.strip()
         metadata['os_type'] = "macOS"
 
     # Fallback
@@ -149,6 +219,18 @@ def extract_snapshot_metadata(display_results, automated_results=None):
         summary = display_results.get("summary", {})
         if summary.get("os_version"):
             metadata['os_version'] = summary["os_version"]
+
+    # macOS-specific final checks
+    if metadata['os_type'] == "macOS":
+        if metadata['computer_name'] == 'Unknown':
+            for p in display_results.get("processes", []):
+                path = str(p.get("ImagePath") or p.get("path") or p.get("comm", "")).lower()
+                if "/users/" in path and not any(sys in path for sys in ["/system/", "/library/"]):
+                    metadata['computer_name'] = "Mac"
+                    break
+        
+        if metadata['username'] != 'Unknown':
+            metadata['username'] = metadata['username'].capitalize()
 
     return metadata
 
@@ -164,9 +246,9 @@ def generate_json_report(results):
                      'files': results.get('file_objects', [])}
     }, indent=2)
 
-# ========================
+# ==============================================
 # TABS
-# ========================
+# ==============================================
 tab1, tab2, tab3, tab4 = st.tabs(["Upload Snapshot", "Timeline & Analysis", "Advanced Analytics", "Deep Forensics"])
 
 with tab1:
@@ -182,12 +264,12 @@ with tab1:
         if os_type == "Linux":
             st.info("**Linux requires 2 files:** Select both .vmem AND .vmsn files (hold Cmd/Ctrl to select multiple)")
         elif os_type == "macOS":
-            st.info("**macOS:** Upload .vmem, .raw, or .sav file")
+            st.info("**macOS requires 2 files:** Select both .vmem AND .vmsn files (hold Cmd/Ctrl to select multiple)")
         
         uploaded_files = st.file_uploader(
             "Choose snapshot file(s)" if os_type != "Linux" else "Choose BOTH .vmem and .vmsn files",
-            type=['vmem', 'vmsn', 'sav', 'raw', 'gz'],
-            help="For Linux: Upload BOTH .vmem and .vmsn files | For Windows/macOS: Upload .vmem, .raw, or .sav file",
+            type=['vmem', 'vmsn'],
+            help="For Linux: Upload BOTH .vmem and .vmsn files | For Windows/macOS: Upload .vmem file",
             accept_multiple_files=True  # Enable multiple file upload
         )
 
@@ -206,8 +288,6 @@ with tab1:
                     st.success(f"{idx}. {uploaded_file.name} - {size_str} (Memory dump)")
                 elif uploaded_file.name.endswith('.vmsn'):
                     st.info(f"{idx}. {uploaded_file.name} - {size_str} (Snapshot metadata)")
-                elif uploaded_file.name.endswith('.raw'):
-                    st.success(f"{idx}. {uploaded_file.name} - {size_str} (Raw memory)")
                 else:
                     st.write(f"{idx}. {uploaded_file.name} - {size_str}")
             
@@ -245,7 +325,7 @@ with tab1:
         if os_type == "Linux":
             st.info("Linux needs both .vmem AND .vmsn files")
         elif os_type == "Windows":
-            st.info("Windows needs .vmem or .raw file")
+            st.info("Windows needs .vmem file")
         else:
             st.info("macOS needs .vmem AND .vmsn  file")
 
@@ -258,7 +338,7 @@ with tab1:
         extract_network = st.checkbox(" Extract Network", True, help="Extract active connections, listening ports, and network activity")
     with c2:
         extract_files = st.checkbox(" Extract Files", True, help="Extract open file handles and file objects")
-        extract_registry = st.checkbox(" Registry (Windows)", os_type == "Windows", help="Extract registry hives and activity (Windows only)")
+        extract_registry = st.checkbox(" Registry", os_type == "Windows", help="Extract registry hives and activity")
 
     # Display what will be extracted
     selected_options = []
@@ -303,15 +383,15 @@ with tab1:
                     saved_files.append(tmp_path)
                     st.info(f"Saved: {uploaded_file.name}")
                 
-                # Use the primary file (.vmem or .raw) for analysis
+                # Use the primary file (.vmem) for analysis
                 primary_file = None
                 for f in saved_files:
-                    if f.suffix.lower() in ['.vmem', '.raw', '.sav']:
+                    if f.suffix.lower() in ['.vmem']:
                         primary_file = f
                         break
                 
                 if not primary_file:
-                    st.error(" No valid memory dump found (.vmem, .raw, or .sav)")
+                    st.error(" No valid memory dump found (.vmem)")
                 else:
                     try:
                         with st.spinner(" Analyzing..."):
@@ -346,13 +426,18 @@ with tab1:
                             if automated_path.exists():
                                 with open(automated_path) as f:
                                     automated_results = json.load(f)
+
+                            # keep automated results for later tabs
+                            st.session_state.automated_results = automated_results
                             
                             # Extract metadata using V2 function
                             snapshot_metadata = extract_snapshot_metadata(display_results, automated_results)
+                            
                             snapshot_metadata['filename'] = primary_file.name
                             snapshot_metadata['size_gb'] = f"{total_gb:.2f}"
                             snapshot_metadata['os_type'] = os_type
                             
+                            st.session_state.automated_results = automated_results
                             st.session_state.analysis_results = display_results
                             st.session_state.raw_file_path = str(primary_file)
                             st.session_state.session_dir = results["session_dir"]
@@ -384,9 +469,9 @@ with tab1:
             st.session_state.snapshot_info = None
             st.rerun()
 
-# ========================
+# ==============================================
 # TAB 2: TIMELINE & ANALYSIS
-# ========================
+# ==============================================
 with tab2:
     if not st.session_state.analysis_complete:
         st.info(" **Upload and analyze a snapshot first**")
@@ -488,8 +573,28 @@ with tab2:
             col_t2.metric("🟡 Medium Risk", med_threat)
             col_t3.metric("🟢 Low Risk", low_threat)
             col_t4.metric(" Clean", len(procs_df) - len(suspicious_procs))
+
+            st.caption(
+                "Suspicion score is a heuristic 0–10 combining thread count, "
+                "process type, script usage and unusual paths: 1–3 = low, "
+                "4–6 = medium, 7+ = high."
+            )
         else:
             st.success(" No threats detected in this snapshot")
+        
+        # Automated narrative report from backend analysis
+        if "automated_results" in st.session_state and st.session_state.automated_results:
+            with st.expander("View Automated Forensic Narrative Report", expanded=False):
+                text_report = generate_text_report(st.session_state.automated_results)
+                st.text(text_report)
+
+                st.download_button(
+                    "Download Text Report",
+                    text_report,
+                    file_name=f"vast_text_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
         
         st.markdown("---")
         
@@ -520,7 +625,7 @@ with tab2:
             if name and name != "Unknown":
                 return str(name)
             
-            # Last resort: check if there's any string value in the dict
+            # Check if there's any string value in the dict
             for key, value in proc.items():
                 if isinstance(value, str) and value and len(value) > 0 and key.lower() in ['image', 'process', 'command', 'executable']:
                     return str(value)
@@ -548,10 +653,6 @@ with tab2:
             pid = get_pid(proc)
             ppid = get_ppid(proc)
             
-            # Debug: Print first process to see structure
-            if i == 0:
-                st.info(f"🔍 Debug - First process keys: {list(proc.keys())}")
-            
             timeline_events.append({
                 'seq': i,
                 'type': '⚙️ Process',
@@ -561,8 +662,9 @@ with tab2:
                 'time': f"Event #{i+1}"
             })
 
-          # Add network connections to timeline
+        # Add network connections to timeline
         offset = len(timeline_events)
+
         for i, conn in enumerate(conns[:30]):
             if not isinstance(conn, dict):
                 continue
@@ -623,9 +725,6 @@ with tab2:
 
         # Display timeline cards
         if timeline_events:
-            # Show debug info
-            st.info(f"📊 Timeline generated: {len(timeline_events)} events ({len([e for e in timeline_events if e['type'] == '⚙️ Process'])} processes, {len([e for e in timeline_events if e['type'] == '🌐 Network'])} connections, {len([e for e in timeline_events if e['type'] == '📁 File'])} files)")
-            
             for event in timeline_events[:50]: # Show first 50 events
                 susp_badge = "🔴 HIGH RISK" if event['suspicious'] >= 7 else ("🟡 MEDIUM" if event['suspicious'] >= 4 else ("🟢 LOW" if event['suspicious'] > 0 else ""))
                 
@@ -698,9 +797,9 @@ with tab2:
         else:
             st.info(" No file objects extracted")
 
-# ========================
+# ==============================================
 # TAB 3: ADVANCED ANALYTICS (ALL VISUALIZATIONS)
-# ========================
+# ==============================================
 with tab3:
     if not st.session_state.analysis_complete:
         st.info(" **Complete analysis first to view advanced analytics**")
@@ -709,18 +808,6 @@ with tab3:
         snapshot_info = st.session_state.snapshot_info or {}
         
         st.header(" Advanced Analytics & Visualizations")
-        
-        # SNAPSHOT INFO AT TOP
-        # st.markdown("### Device Information")
-        # info_col1, info_col2, info_col3 = st.columns(3)
-        # with info_col1:
-        #     st.metric(" User", snapshot_info.get('username', 'Unknown'))
-        # with info_col2:
-        #     st.metric(" Device", snapshot_info.get('computer_name', 'Unknown'))
-        # with info_col3:
-        #     st.metric("🪟 OS", snapshot_info.get('os_version', snapshot_info.get('os_type', 'Unknown')))
-        
-        # st.markdown("---")
         
         procs = results.get('processes', [])
         conns = results.get('connections', [])
@@ -782,20 +869,43 @@ with tab3:
                 st.plotly_chart(fig_threat, use_container_width=True)
                 
                 st.markdown("#### Top 10 Most Suspicious Processes")
-                top_suspicious = suspicious_procs.nlargest(10, 'suspicious_score')
+                top_suspicious = suspicious_procs.nlargest(10, "suspicious_score").copy()
+
                 cols_to_show = []
-                if 'ImageFileName' in top_suspicious.columns:
-                    cols_to_show.append('ImageFileName')
-                elif 'comm' in top_suspicious.columns:
-                    cols_to_show.append('comm')
-                if 'PID' in top_suspicious.columns:
-                    cols_to_show.append('PID')
-                elif 'pid' in top_suspicious.columns:
-                    cols_to_show.append('pid')
-                cols_to_show.extend(['suspicious_score'])
-                if 'tags' in top_suspicious.columns:
-                    cols_to_show.append('tags')
-                st.dataframe(top_suspicious[cols_to_show], use_container_width=True)
+                name_col = None
+
+                if "ImageFileName" in top_suspicious.columns:
+                    name_col = "ImageFileName"
+                    cols_to_show.append("ImageFileName")
+                elif "comm" in top_suspicious.columns:
+                    name_col = "comm"
+                    cols_to_show.append("comm")
+
+                # MITRE mapping only makes sense when we have ImageFileName
+                if name_col == "ImageFileName":
+                    top_suspicious["MITRE"] = (
+                        top_suspicious["ImageFileName"]
+                        .astype(str)
+                        .str.lower()
+                        .map(MITRE_MAP)
+                        .fillna("")
+                    )
+                    cols_to_show.append("MITRE")
+
+                if "PID" in top_suspicious.columns:
+                    cols_to_show.append("PID")
+                elif "pid" in top_suspicious.columns:
+                    cols_to_show.append("pid")
+
+                cols_to_show.append("suspicious_score")
+                if "tags" in top_suspicious.columns:
+                    cols_to_show.append("tags")
+
+                st.dataframe(
+                    top_suspicious[cols_to_show],
+                    use_container_width=True,
+                    height=350,
+                )
             else:
                 st.success(" No suspicious processes detected!")
         
@@ -901,48 +1011,7 @@ with tab3:
         
         st.markdown("---")
         
-        # # 6. MITRE ATT&CK HEATMAP
-        # st.subheader(" MITRE ATT&CK Technique Coverage")
-        
-        # st.info(" MITRE ATT&CK mapping shows which attack techniques were observed in the snapshot")
-        
-        # if not procs_df.empty and 'suspicious_score' in procs_df.columns:
-        #     suspicious_count = len(procs_df[procs_df['suspicious_score'] > 0])
-            
-        #     techniques = {
-        #         'T1055 - Process Injection': min(suspicious_count * 0.3, 10),
-        #         'T1059 - Command Execution': min(suspicious_count * 0.4, 10),
-        #         'T1071 - Application Layer Protocol': min(len(conns_df) * 0.1, 10) if not conns_df.empty else 0,
-        #         'T1082 - System Information Discovery': min(len(procs_df) * 0.05, 10),
-        #         'T1083 - File Discovery': min(len(files_df) * 0.02, 10) if not files_df.empty else 0,
-        #         'T1057 - Process Discovery': min(len(procs_df) * 0.08, 10),
-        #         'T1049 - System Network Connections': min(len(conns_df) * 0.15, 10) if not conns_df.empty else 0,
-        #     }
-            
-        #     fig_mitre = go.Figure(data=go.Bar(
-        #         x=list(techniques.values()),
-        #         y=list(techniques.keys()),
-        #         orientation='h',
-        #         marker=dict(
-        #             color=list(techniques.values()),
-        #             colorscale='Reds',
-        #             showscale=True,
-        #             colorbar=dict(title="Confidence")
-        #         )
-        #     ))
-            
-        #     fig_mitre.update_layout(
-        #         title='MITRE ATT&CK Techniques Detected',
-        #         xaxis_title='Confidence Score',
-        #         yaxis_title='Technique',
-        #         template='plotly_dark',
-        #         height=400
-        #     )
-        #     st.plotly_chart(fig_mitre, use_container_width=True)
-        
-        # st.markdown("---")
-        
-        # 7. TOP 10 ANALYTICS
+        # 6. TOP 10 ANALYTICS
         st.subheader(" Top 10 Analytics")
         
         tab_top1, tab_top2, tab_top3 = st.tabs([" Processes", " Network", " Files"])
@@ -1051,7 +1120,7 @@ with tab3:
         
         st.markdown("---")
         
-        # 8. COMPREHENSIVE STATISTICS
+        # 7. COMPREHENSIVE STATISTICS
         st.subheader(" Comprehensive Statistics")
         
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -1099,8 +1168,10 @@ with tab3:
                 use_container_width=True
             )
 
+# ==============================================
 # TAB 4 - COMPREHENSIVE FORENSICS
-# TAB 4 - COMPREHENSIVE FORENSICS
+# ==============================================
+
 with tab4:
     st.title("🔍 Deep Forensics Analysis")
     
@@ -1128,16 +1199,34 @@ with tab4:
             
             # Process Statistics (OS-aware)
             total_procs = len(procs)
-            
-            # Detect system vs user processes based on OS
-            if os_type.lower() == "windows":
-                system_procs = len([p for p in procs if 'NT AUTHORITY' in str(p.get('User', '')) or 'SYSTEM' in str(p.get('User', ''))])
-            elif os_type.lower() in ["linux", "macos"]:
-                system_procs = len([p for p in procs if p.get('User') in ['0', 0, 'root', 'Unknown']])
-            else:
-                system_procs = 0
-            
-            user_procs = total_procs - system_procs
+
+            # Smarter classification: use both User and Image name
+            SYSTEM_ACCOUNTS = {
+                "SYSTEM", "NT AUTHORITY\\SYSTEM", "LOCAL SERVICE",
+                "NETWORK SERVICE", "root"
+            }
+            SYSTEM_IMAGES = {
+                "system", "registry", "smss.exe", "csrss.exe", "wininit.exe",
+                "services.exe", "lsass.exe", "svchost.exe", "winlogon.exe",
+                "explorer.exe", "searchapp.exe", "dwm.exe", "fontdrvhost.exe"
+            }
+
+            system_proc_list = []
+            user_proc_list = []
+
+            for p in procs:
+                if not isinstance(p, dict):
+                    continue
+                name = str(p.get("ImageFileName", "") or p.get("comm", "")).lower()
+                user = str(p.get("User", "") or p.get("user", "")).upper()
+
+                if user in SYSTEM_ACCOUNTS or name in SYSTEM_IMAGES:
+                    system_proc_list.append(p)
+                else:
+                    user_proc_list.append(p)
+
+            system_procs = len(system_proc_list)
+            user_procs = len(user_proc_list)
             terminated = len([p for p in procs if p.get('ExitTime')])
             
             col1, col2, col3, col4 = st.columns(4)
@@ -1237,32 +1326,60 @@ with tab4:
             
             st.markdown("---")
             
-            # Process Lookup
+            # Process Lookup (pivot across artifacts)
             st.markdown("#### 🔍 Process Lookup")
             search_term = st.text_input("Search by process name or PID:")
-            
+
+            selected_proc = None
+
             if search_term:
-                matches = [p for p in procs if 
-                          search_term.lower() in str(p.get('ImageFileName', '') or p.get('comm', '')).lower() or
-                          search_term in str(p.get('PID') or p.get('pid', ''))]
-                
+                matches = [
+                    p for p in procs
+                    if search_term.lower() in str(p.get('ImageFileName', '') or p.get('comm', '')).lower()
+                    or search_term == str(p.get('PID') or p.get('pid', ''))
+                ]
+
                 if matches:
-                    st.success(f"✅ Found {len(matches)} matches")
-                    for match in matches[:10]:
-                        proc_name = match.get('ImageFileName') or match.get('comm', 'Unknown')
-                        proc_pid = match.get('PID') or match.get('pid')
-                        with st.expander(f"📋 {proc_name} (PID: {proc_pid})"):
-                            col_a, col_b, col_c = st.columns(3)
-                            col_a.write(f"**PID:** {proc_pid}")
-                            col_b.write(f"**PPID:** {match.get('PPID') or match.get('ppid')}")
-                            col_c.write(f"**Threads:** {match.get('Threads', match.get('threads', 'N/A'))}")
-                            st.write(f"**Path:** {match.get('ImagePath', match.get('path', 'N/A'))}")
-                            st.write(f"**User:** {match.get('User', match.get('user', match.get('uid', 'N/A')))}")
-                            st.write(f"**Created:** {match.get('CreateTime', 'N/A')}")
-                            if match.get('suspicious_score', 0) > 0:
-                                st.warning(f"⚠️ Suspicion Score: {match.get('suspicious_score')}")
+                    selected_proc = matches[0]
+                    proc_name = selected_proc.get('ImageFileName') or selected_proc.get('comm', 'Unknown')
+                    proc_pid = selected_proc.get('PID') or selected_proc.get('pid')
+                    st.success(f"Selected process: {proc_name} (PID {proc_pid})")
                 else:
                     st.warning("⚠️ No matches found")
+
+            if selected_proc:
+                proc_name = selected_proc.get('ImageFileName') or selected_proc.get('comm', 'Unknown')
+                proc_pid = selected_proc.get('PID') or selected_proc.get('pid')
+
+                with st.expander("Process details", expanded=True):
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.write(f"**PID:** {proc_pid}")
+                    col_b.write(f"**PPID:** {selected_proc.get('PPID') or selected_proc.get('ppid')}")
+                    col_c.write(f"**Threads:** {selected_proc.get('Threads', selected_proc.get('threads', 'N/A'))}")
+                    st.write(f"**Path:** {selected_proc.get('ImagePath', selected_proc.get('path', 'N/A'))}")
+                    st.write(f"**User:** {selected_proc.get('User', selected_proc.get('user', selected_proc.get('uid', 'N/A')))}")
+                    st.write(f"**Created:** {selected_proc.get('CreateTime', 'N/A')}")
+                    if selected_proc.get('suspicious_score', 0) > 0:
+                        st.warning(f"⚠️ Suspicion Score: {selected_proc.get('suspicious_score')}")
+
+                # Pivot: network
+                rel_conns = [
+                    c for c in conns
+                    if c.get('PID') == proc_pid or proc_name in str(c.get('Owner', ''))
+                ]
+                if rel_conns:
+                    with st.expander("Related network connections"):
+                        st.dataframe(pd.DataFrame(rel_conns), height=250)
+
+                # Pivot: files
+                rel_files = [
+                    f for f in files
+                    if f.get('Process') == proc_name or f.get('PID') == proc_pid
+                ]
+                if rel_files:
+                    with st.expander("Related file objects"):
+                        st.dataframe(pd.DataFrame(rel_files), height=250)
+
         
         # SECTION 2: NETWORK FORENSICS
         elif analysis_section == "🌐 Network Forensics":
@@ -1340,7 +1457,10 @@ with tab4:
                     
                     st.dataframe(ip_df, height=300)
                 else:
-                    st.info("ℹ️ No external connections found")
+                    st.info(
+                        "No active established external *external* connections. "
+                        "Only listening/closed or local endpoints were observed in this snapshot."
+                    )
             
             with ip_tabs[1]:
                 st.markdown("**Private Network Connections**")
@@ -1362,7 +1482,10 @@ with tab4:
                     st.warning(f"⚠️ Found {len(private_conns)} private network connections")
                     st.dataframe(pd.DataFrame(private_conns[:50]), height=300)
                 else:
-                    st.success("✅ No private network connections detected")
+                    st.success(
+                        "No active established private-network connections. "
+                        "Only listening/closed endpoints were present."
+                    )
             
             with ip_tabs[2]:
                 st.markdown("**Suspicious Port Detection**")
@@ -1516,6 +1639,19 @@ with tab4:
             col2.metric("🟡 Medium Risk", medium_risk, delta="Warning" if medium_risk > 0 else None)
             col3.metric("🟢 Low Risk", low_risk)
             
+            # MITRE ATT&CK techniques derived from automated analysis
+            automated_results = st.session_state.get("automated_results") or {}
+            summary = automated_results.get("summary", {})
+            threats_summary = summary.get("threats", {})
+            mitre_techniques = threats_summary.get("mitre_techniques", [])
+
+            st.markdown("#### MITRE ATT&CK Techniques Observed")
+            if mitre_techniques:
+                for t in sorted(set(mitre_techniques)):
+                    st.markdown(f"- {t}")
+            else:
+                st.write("No mapped ATT&CK techniques detected from process names.")
+
             st.markdown("---")
             
             # Indicators of Compromise
@@ -1597,7 +1733,10 @@ with tab4:
                 else:
                     st.success("✅ No obvious memory indicators detected")
 
+# ==============================================
 # SIDEBAR
+# ==============================================
+
 with st.sidebar:
     st.markdown("### VAST v3.0")
     st.markdown("**Advanced Forensics Platform**")
@@ -1630,7 +1769,6 @@ with st.sidebar:
     - macOS, Linux, Windows
     - Device identification
     - AI threat detection
-    - MITRE ATT&CK
     - 8 visualizations
     - Real-time search
     """)

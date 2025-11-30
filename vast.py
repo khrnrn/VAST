@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-VAST - Volatile Artifact Snapshot Triage
-Master orchestrator that runs the full extraction pipeline.
-"""
 import argparse
 import json
 import subprocess
@@ -152,7 +148,7 @@ def main():
         return 1
     print(f"File artifacts: {file_json}\n")
 
-    # Step 4: Enhancement (optional)
+    # Step 4: Enhancement
     memory_enhanced = None
     file_enhanced = None
 

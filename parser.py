@@ -1,4 +1,3 @@
-# parser.py
 import sys
 import shutil
 import logging

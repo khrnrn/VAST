@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""
-VAST Integration Module
-Bridges the Streamlit dashboard with the backend VAST pipeline
-"""
 import json
 import subprocess
 import sys
-import tempfile
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
@@ -68,7 +62,6 @@ class VASTAnalyzer:
         cmd = [sys.executable, str(script_path)] + args
         
         try:
-            # FIXED: Removed timeout to match memory_extractor.py and file_extractor.py
             # For large Linux dumps, this can take 30+ minutes
             result = subprocess.run(
                 cmd,
@@ -142,10 +135,10 @@ class VASTAnalyzer:
             
             results["session_dir"] = str(self.session_dir)
             
-            # Step 1: Parse snapshot (14% of total)
+            # Step 1: Parse snapshot
             self._update_progress("Parsing VM snapshot file...", 0.0)
             
-            # Pass ALL files to parser (important for Linux .vmem + .vmsn)
+            # Pass ALL files to parser
             parser_args = []
             for f in file_list:
                 parser_args.append(str(f))
@@ -172,7 +165,7 @@ class VASTAnalyzer:
             raw_memory = max(raw_files, key=lambda p: p.stat().st_mtime)
             results["raw_memory"] = str(raw_memory)
             
-            # Step 2: Extract memory artifacts (28% total - 14% for this step)
+            # Step 2: Extract memory artifacts
             if extract_processes or extract_network:
                 self._update_progress("Extracting memory artifacts (processes, network)... This may take 10-30 minutes for large dumps", 0.14)
                 success, output = self._run_script(
@@ -194,7 +187,7 @@ class VASTAnalyzer:
                     if memory_jsons:
                         results["memory_json"] = str(max(memory_jsons, key=lambda p: p.stat().st_mtime))
             
-            # Step 3: Extract file artifacts (42% total - 14% for this step)
+            # Step 3: Extract file artifacts
             if extract_files or extract_registry:
                 self._update_progress("Extracting file and registry artifacts... This may take 10-30 minutes", 0.28)
                 success, output = self._run_script(
@@ -216,7 +209,7 @@ class VASTAnalyzer:
                     if file_jsons:
                         results["file_json"] = str(max(file_jsons, key=lambda p: p.stat().st_mtime))
             
-            # Step 4: Enhancement phase (70% total - 28% for this step)
+            # Step 4: Enhancement phase
             if results["memory_json"]:
                 self._update_progress("Enhancing artifacts with threat intelligence...", 0.42)
                 success, output = self._run_script(
@@ -251,7 +244,7 @@ class VASTAnalyzer:
                 
                 self._update_progress("File artifacts enhanced", 0.70)
             
-            # Step 5: Generate final report (85% total - 15% for this step)
+            # Step 5: Generate final report
             self._update_progress("Generating final report...", 0.70)
             report = self._generate_report(results, file_list, os_type)
             
@@ -261,7 +254,7 @@ class VASTAnalyzer:
             
             self._update_progress("Report generated", 0.85)
             
-            # Step 6: Run automated analysis (100% total - 15% for this step)
+            # Step 6: Run automated analysis
             self._update_progress("Running automated deep analysis...", 0.85)
             
             memory_file = results["memory_enhanced"] or results["memory_json"]
@@ -274,6 +267,7 @@ class VASTAnalyzer:
                         str(raw_memory),
                         memory_file,
                         file_file,
+                        "--os", os_type,
                         "--session", str(self.session_dir)
                     ]
                 )
