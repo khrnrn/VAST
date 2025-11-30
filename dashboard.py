@@ -186,6 +186,26 @@ def extract_snapshot_metadata(display_results, automated_results=None):
             metadata['os_version'] = os_release.strip('"')
         metadata['os_type'] = "Linux"
 
+        if metadata['username'] == 'Unknown':
+            for p in display_results.get("processes", [])[:50]:
+                user = p.get("User") or p.get("user") or p.get("UID") or p.get("uid")
+                if user and isinstance(user, str) and not user.isdigit() and user not in system_accounts:
+                    metadata['username'] = user
+                    break
+        
+        # If hostname still unknown, try from automated_results
+        if metadata['computer_name'] == 'Unknown' and automated_results:
+            sys_info = automated_results.get("system_info", {})
+            hostname = sys_info.get("hostname") or sys_info.get("computer_name")
+            if hostname and hostname != "Unknown":
+                metadata['computer_name'] = hostname
+        
+        # If OS version still unknown, try from automated_results
+        if metadata['os_version'] == 'Unknown' and automated_results:
+            sys_info = automated_results.get("system_info", {})
+            if sys_info.get("os_version") and sys_info["os_version"] != "Unknown":
+                metadata['os_version'] = sys_info["os_version"]
+
     # macOS
     elif any("Darwin Kernel" in str(item.get('Value', '')) for item in plugin_output):
         kernel_line = next((item['Value'] for item in plugin_output 

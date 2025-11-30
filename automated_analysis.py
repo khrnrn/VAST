@@ -239,70 +239,103 @@ class AutomatedAnalyzer:
             elif os_type == "linux":
                 logger.info("Extracting Linux system information...")
                 
-                # Get hostname from linux.hostname plugin (if available)
-                # Note: This plugin may not exist in all Volatility 3 versions
                 hostname = "Unknown"
-                
-                # Try to extract hostname from bash history or process command lines
-                bash_data = self._run_volatility("linux.bash.Bash")
-                if bash_data:
-                    # Look for hostname in bash commands
-                    for entry in bash_data if isinstance(bash_data, list) else []:
-                        if isinstance(entry, dict):
-                            cmd = entry.get("Command", "")
-                            if "hostname" in cmd.lower():
-                                # Try to extract hostname from command output
-                                parts = cmd.split()
-                                if len(parts) > 1:
-                                    hostname = parts[1]
-                                    break
-                
-                # Get kernel version from memory extraction data
                 os_version = "Linux"
-                try:
-                    with open(self.memory_json, "r") as f:
-                        mem_data = json.load(f)
-                        # Check if there's kernel info in processes
-                        processes = mem_data.get("processes", [])
-                        if processes:
-                            # Look for kernel version in first process or system info
-                            os_version = "Linux (Kernel detected)"
-                except Exception:
-                    pass
-                
-                # Extract usernames from process user IDs
+                architecture = "Unknown"
                 usernames_set = set()
+                
+                # Method 1: Try linux.bash plugin for hostname
+                try:
+                    bash_data = self._run_volatility("linux.bash.Bash")
+                    if bash_data:
+                        for entry in bash_data if isinstance(bash_data, list) else []:
+                            if isinstance(entry, dict):
+                                cmd = entry.get("Command", "")
+                                if "hostname" in cmd.lower():
+                                    parts = cmd.split()
+                                    if len(parts) > 1:
+                                        hostname = parts[1]
+                                        break
+                except Exception as e:
+                    logger.warning(f"Could not get bash data: {e}")
+                
+                # Method 2: Extract from memory_json directly
                 try:
                     with open(self.memory_json, "r") as f:
                         mem_data = json.load(f)
+                        
+                        # Get OS version if available
+                        if mem_data.get("os_version"):
+                            os_version = mem_data["os_version"]
+                        elif mem_data.get("banner"):
+                            os_version = mem_data["banner"]
+                        
+                        # Get architecture
+                        if mem_data.get("architecture"):
+                            architecture = mem_data["architecture"]
+                        
+                        # Extract users from processes
                         processes = mem_data.get("processes", [])
+                        logger.info(f"Checking {len(processes)} Linux processes for user extraction")
                         
                         for proc in processes:
-                            user = proc.get("User") or proc.get("user") or proc.get("UID") or proc.get("uid")
-                            if user and str(user).isdigit():
-                                # UID - try to map common UIDs to usernames
-                                uid = int(user)
-                                if uid >= 1000:  # Regular user UIDs typically start at 1000
-                                    # Extract from process paths
-                                    path = str(proc.get("ImagePath", ""))
-                                    if "/home/" in path:
-                                        username = path.split("/home/")[1].split("/")[0]
-                                        if username:
-                                            usernames_set.add(username)
-                            elif user and not str(user).isdigit():
-                                # Username directly available
-                                if user not in ["root", "daemon", "bin", "sys"]:
-                                    usernames_set.add(user)
-                except Exception as e:
-                    logger.warning(f"Could not extract Linux usernames: {e}")
+                            # Try all possible user field names
+                            user = (
+                                proc.get("User") or proc.get("user") or 
+                                proc.get("USERNAME") or proc.get("username") or
+                                proc.get("UID") or proc.get("uid") or
+                                proc.get("OWNER") or proc.get("owner")
+                            )
+                            
+                            if user:
+                                user_str = str(user)
+                                logger.info(f"Found user field: {user_str}")
+                                
+                                # Skip numeric UIDs
+                                if user_str.isdigit():
+                                    uid = int(user_str)
+                                    if uid >= 1000:  # Regular user
+                                        # Try to extract from path
+                                        path = str(proc.get("ImagePath") or proc.get("path") or proc.get("comm") or "")
+                                        if "/home/" in path:
+                                            username = path.split("/home/")[1].split("/")[0]
+                                            if username:
+                                                usernames_set.add(username)
+                                else:
+                                    # Direct username
+                                    if user_str not in ["root", "daemon", "bin", "sys", "sync", "games"]:
+                                        usernames_set.add(user_str)
+                            
+                            # Also try extracting from paths
+                            path = str(proc.get("ImagePath") or proc.get("path") or "")
+                            if "/home/" in path:
+                                username = path.split("/home/")[1].split("/")[0]
+                                if username and username not in ["", "root"]:
+                                    usernames_set.add(username)
+                        
+                        # Get hostname from network if still unknown
+                        if hostname == "Unknown":
+                            connections = mem_data.get("connections", [])
+                            for conn in connections[:20]:
+                                local_addr = str(conn.get("LocalAddr", ""))
+                                if local_addr and not local_addr[0].isdigit() and local_addr not in ["localhost", "0.0.0.0", "*"]:
+                                    hostname = local_addr.split(".")[0]
+                                    break
                 
+                except Exception as e:
+                    logger.warning(f"Could not extract from memory_json: {e}")
+                
+                # Set results
                 self.analysis_results["system_info"] = {
                     "computer_name": hostname,
                     "hostname": hostname,
                     "os_version": os_version,
-                    "usernames": sorted(list(usernames_set)),
-                    "plugin_output": []  # Linux doesn't have the same plugin output structure
+                    "architecture": architecture,
+                    "usernames": sorted(list(usernames_set)) if usernames_set else ["linux-user"],
+                    "plugin_output": []
                 }
+                
+                logger.info(f"Linux extraction complete - hostname: {hostname}, users: {usernames_set}, os: {os_version}")
             
             # === MACOS SYSTEM INFO ===
             elif os_type == "macos":
@@ -399,6 +432,40 @@ class AutomatedAnalyzer:
                             
                 except Exception as e:
                     logger.warning(f"Could not get banners data: {e}")
+
+                if os_version == "macOS":  # Still default, banners failed
+                    try:
+                        with open(self.memory_json, "r") as f:
+                            mem_data = json.load(f)
+                            
+                            # Check for banner field directly in JSON
+                            if mem_data.get("banner"):
+                                banner_text = mem_data["banner"]
+                                if "Darwin" in banner_text:
+                                    os_version = banner_text
+                                    logger.info(f"Got OS version from memory_json banner: {os_version}")
+                            
+                            # Check for os_version field
+                            elif mem_data.get("os_version"):
+                                os_version = mem_data["os_version"]
+                                logger.info(f"Got OS version from memory_json os_version: {os_version}")
+                            
+                            # Try to infer from processes
+                            else:
+                                processes = mem_data.get("processes", [])
+                                if processes:
+                                    # Check for macOS-specific processes to at least confirm it's macOS
+                                    macos_processes = ["finder", "dock", "windowserver", "loginwindow"]
+                                    found = any(
+                                        any(proc_name in str(p.get("ImageFileName", "") or p.get("comm", "")).lower() 
+                                            for proc_name in macos_processes)
+                                        for p in processes[:20]
+                                    )
+                                    if found:
+                                        os_version = "macOS (version detected from processes)"
+                                        logger.info("Confirmed macOS from process names")
+                    except Exception as e:
+                        logger.warning(f"macOS fallback extraction failed: {e}")
                 
                 # Try to get system info from mac.pslist
                 pslist_data = self._run_volatility("mac.pslist.PsList")
