@@ -169,15 +169,9 @@ class AutomatedAnalyzer:
             sys.executable,
             str(self.vol_script),
             "-f", str(self.raw_path),
+            "-r", "json",
             plugin
         ] + plugin_args
-        
-        # Add symbol files for macOS
-        if "mac." in plugin or "banners" in plugin.lower():
-            cmd.insert(4, "-u")
-            cmd.insert(5, "https://github.com/Abyss-W4tcher/volatility3-symbols/raw/master/banners/banners.json")
-        
-        logger.info(f"Running Volatility: {' '.join(cmd)}")
         
         try:
             result = subprocess.run(
@@ -190,64 +184,12 @@ class AutomatedAnalyzer:
             )
             
             if result.returncode != 0:
-                logger.warning(f"Volatility command failed: {result.stderr}")
                 return None
             
-            output = result.stdout.strip()
-            if not output:
-                return None
-            
-            # Parse text output from banners plugin
-            if "banners" in plugin.lower():
-                return self._parse_banners_text(output)
-            
-            # For other plugins, try to parse as JSON if possible
-            try:
-                return json.loads(output)
-            except json.JSONDecodeError:
-                # Return raw text if not JSON
-                logger.warning(f"Could not parse JSON, returning raw text")
-                return {"raw_output": output}
-                
+            return json.loads(result.stdout.strip()) if result.stdout.strip() else None
         except Exception as e:
             logger.error(f"Volatility command failed: {e}")
             return None
-        
-    def _parse_banners_text(self, output: str) -> List[Dict[str, Any]]:
-        """Parse text output from banners.Banners plugin."""
-        banners = []
-        lines = output.split('\n')
-        
-        # Skip header lines (Volatility 3 Framework, Progress, Offset/Banner header)
-        data_started = False
-        for line in lines:
-            line = line.strip()
-            
-            # Skip empty lines and headers
-            if not line or "Volatility" in line or "Progress:" in line or line.startswith("Offset"):
-                continue
-            
-            # Skip the header separator line
-            if line.startswith("---") or line == "Banner":
-                data_started = True
-                continue
-            
-            if data_started and line:
-                # Split by whitespace, first part is offset, rest is banner
-                parts = line.split(None, 1)
-                if len(parts) == 2:
-                    offset = parts[0]
-                    banner = parts[1]
-                    
-                    # Only add Darwin kernel banners
-                    if "Darwin" in banner and "Kernel" in banner:
-                        banners.append({
-                            "Offset": offset,
-                            "Banner": banner
-                        })
-        
-        logger.info(f"Parsed {len(banners)} Darwin banners from text output")
-        return banners
     
     def analyze_system_info(self):
             """Extract basic system information - NOW SUPPORTS WINDOWS, LINUX, AND MACOS."""
@@ -370,68 +312,101 @@ class AutomatedAnalyzer:
                 os_version = "macOS"
                 architecture = "Unknown"
                 
-                # Try to get OS version from banners plugin
+                # Try to get OS version from banners plugin first
                 try:
                     banners_data = self._run_volatility("banners.Banners")
-                    logger.info(f"Banners data received: {banners_data}")
-                    
-                    if banners_data and isinstance(banners_data, list):
-                        # Find the first Darwin kernel banner
-                        for entry in banners_data:
-                            if isinstance(entry, dict):
-                                banner_text = entry.get("Banner", "")
-                                
-                                if banner_text and "Darwin" in banner_text and "Kernel" in banner_text:
-                                    logger.info(f"Found Darwin banner: {banner_text}")
-                                    
-                                    try:
-                                        # Extract Darwin version number
-                                        # Format: "Darwin Kernel Version 19.6.0: ..."
-                                        if "Darwin Kernel Version" in banner_text:
-                                            version_part = banner_text.split("Version ")[1].split(":")[0].strip()
-                                            darwin_ver = version_part.split(".")[0]
-                                            darwin_major = int(darwin_ver)
-                                            
-                                            logger.info(f"Parsed Darwin version: {darwin_major}")
-                                            
-                                            # Map Darwin version to macOS version
-                                            version_map = {
-                                                23: "macOS 14 Sonoma",
-                                                22: "macOS 13 Ventura",
-                                                21: "macOS 12 Monterey",
-                                                20: "macOS 11 Big Sur",
-                                                19: "macOS 10.15 Catalina",
-                                                18: "macOS 10.14 Mojave",
-                                                17: "macOS 10.13 High Sierra",
-                                                16: "macOS 10.12 Sierra",
-                                                15: "macOS 10.11 El Capitan",
-                                                14: "macOS 10.10 Yosemite",
-                                            }
-                                            
-                                            macos_name = version_map.get(darwin_major, f"macOS (Darwin {darwin_major})")
-                                            
-                                            # Extract architecture from banner
-                                            if "X86_64" in banner_text or "x86_64" in banner_text:
-                                                architecture = "x64"
-                                            elif "ARM64" in banner_text or "arm64" in banner_text:
-                                                architecture = "ARM64"
-                                            else:
-                                                architecture = "Unknown"
-                                            
-                                            os_version = f"{macos_name} (Darwin {version_part})"
-                                            logger.info(f"Successfully mapped to: {os_version}, Architecture: {architecture}")
-                                            break
-                                            
-                                    except (IndexError, ValueError) as e:
-                                        logger.warning(f"Could not parse Darwin version from banner: {e}")
-                                        os_version = banner_text
-                    else:
-                        logger.warning(f"Banners data is not in expected format: {type(banners_data)}")
+                    if banners_data:
+                        logger.info(f"Banners data type: {type(banners_data)}")
+                        logger.info(f"Banners data content: {banners_data}")
                         
+                        # Extract Darwin kernel info from banners
+                        banner_text = None
+                        
+                        # Handle list format (common in Volatility 3)
+                        if isinstance(banners_data, list):
+                            for entry in banners_data:
+                                if isinstance(entry, dict):
+                                    banner = str(entry.get("Banner", ""))
+                                    if "Darwin" in banner and "Kernel" in banner:
+                                        banner_text = banner
+                                        break
+                        
+                        # Handle dict with __children
+                        elif isinstance(banners_data, dict):
+                            if "__children" in banners_data:
+                                for entry in banners_data["__children"]:
+                                    if isinstance(entry, dict):
+                                        banner = str(entry.get("Banner", ""))
+                                        if "Darwin" in banner and "Kernel" in banner:
+                                            banner_text = banner
+                                            break
+                            else:
+                                # Single banner in dict format
+                                banner = str(banners_data.get("Banner", ""))
+                                if "Darwin" in banner:
+                                    banner_text = banner
+                        
+                        # Parse the banner if found
+                        if banner_text:
+                            logger.info(f"Found Darwin banner: {banner_text}")
+                            os_version = banner_text
+                            
+                            try:
+                                # Extract Darwin version number
+                                if "Darwin Kernel Version" in banner_text:
+                                    version_part = banner_text.split("Version ")[1].split(":")[0]
+                                    darwin_ver = version_part.split(".")[0]
+                                    darwin_major = int(darwin_ver)
+                                    
+                                    logger.info(f"Parsed Darwin version: {darwin_major}")
+                                    
+                                    # Map Darwin version to macOS version
+                                    if darwin_major >= 23:
+                                        macos_name = f"macOS 14 Sonoma"
+                                    elif darwin_major == 22:
+                                        macos_name = "macOS 13 Ventura"
+                                    elif darwin_major == 21:
+                                        macos_name = "macOS 12 Monterey"
+                                    elif darwin_major == 20:
+                                        macos_name = "macOS 11 Big Sur"
+                                    elif darwin_major == 19:
+                                        macos_name = "macOS 10.15 Catalina"
+                                    elif darwin_major == 18:
+                                        macos_name = "macOS 10.14 Mojave"
+                                    elif darwin_major == 17:
+                                        macos_name = "macOS 10.13 High Sierra"
+                                    elif darwin_major == 16:
+                                        macos_name = "macOS 10.12 Sierra"
+                                    else:
+                                        macos_name = f"macOS (Darwin {darwin_major})"
+                                    
+                                    # Extract architecture from banner
+                                    if "X86_64" in banner_text or "x86_64" in banner_text:
+                                        architecture = "x64"
+                                    elif "ARM64" in banner_text or "arm64" in banner_text:
+                                        architecture = "ARM64"
+                                    else:
+                                        architecture = "Unknown"
+                                    
+                                    os_version = f"{macos_name} (Darwin {darwin_ver})"
+                                    logger.info(f"Mapped to: {os_version}, Architecture: {architecture}")
+                                    
+                            except (IndexError, ValueError) as e:
+                                logger.warning(f"Could not parse Darwin version from banner: {e}")
+                                os_version = banner_text
+                        else:
+                            logger.warning("No valid Darwin banner found in banners data")
+                            
                 except Exception as e:
-                    logger.error(f"Could not get banners data: {e}", exc_info=True)
+                    logger.warning(f"Could not get banners data: {e}")
                 
-                # Extract usernames from process data
+                # Try to get system info from mac.pslist
+                pslist_data = self._run_volatility("mac.pslist.PsList")
+                
+                if pslist_data:
+                    logger.info(f"Got pslist data for macOS system detection")
+                
+                # Extract usernames from process data - AGGRESSIVE APPROACH
                 usernames_set = set()
                 hostname_candidates = set()
                 
@@ -442,48 +417,67 @@ class AutomatedAnalyzer:
                         
                         logger.info(f"Checking {len(processes)} macOS processes for username extraction")
                         
-                        # Look for user-specific processes
+                        # First pass: look for obvious user indicators
                         for proc in processes:
+                            # Method 1: Process name might indicate user
                             proc_name = str(proc.get("ImageFileName", "") or proc.get("comm", "") or proc.get("COMM", "") or proc.get("NAME", ""))
                             
                             # User-specific processes
                             if any(app in proc_name.lower() for app in ["finder", "dock", "safari", "loginwindow", "windowserver"]):
+                                logger.info(f"Found user process: {proc_name}")
+                                
+                                # Check all possible user fields
                                 user_field = (proc.get("User") or proc.get("user") or 
                                             proc.get("UID") or proc.get("uid") or 
                                             proc.get("OWNER") or proc.get("owner"))
                                 
                                 if user_field:
                                     user_str = str(user_field)
+                                    logger.info(f"  User field value: {user_str}")
                                     
                                     # Handle "user@hostname" format
                                     if "@" in user_str:
                                         username, host = user_str.split("@", 1)
                                         usernames_set.add(username)
                                         hostname_candidates.add(host)
+                                        logger.info(f"  Extracted username: {username}, hostname: {host}")
                                     # Handle numeric UIDs (macOS user UIDs >= 501)
                                     elif user_str.isdigit():
                                         uid_num = int(user_str)
                                         if uid_num >= 501:
+                                            # Use generic username based on UID
                                             usernames_set.add(f"user{uid_num}")
+                                            logger.info(f"  Found user UID: {uid_num}")
                                     # Handle direct username
                                     elif user_str not in ["root", "daemon", "nobody", "_unknown", "0"]:
                                         usernames_set.add(user_str)
+                                        logger.info(f"  Found username: {user_str}")
+                            
+                            # Method 2: Check PID/PPID patterns (user processes typically have higher PIDs)
+                            pid = proc.get("PID") or proc.get("pid")
+                            if pid and isinstance(pid, int) and pid > 100:
+                                # These are likely user processes, not kernel
+                                if "finder" in proc_name.lower() or "dock" in proc_name.lower():
+                                    # Even if we don't have username, we know there's a user
+                                    logger.info(f"Found user-context process (PID {pid}): {proc_name}")
                         
-                        # Try to find hostname from network info
+                        # Second pass: try to find hostname from network info
                         connections = mem_data.get("connections", [])
-                        for conn in connections[:20]:
+                        for conn in connections[:20]:  # Check first 20 connections
                             local_addr = str(conn.get("LocalAddr", ""))
                             if local_addr and not local_addr[0].isdigit() and local_addr not in ["localhost", "*", ""]:
                                 hostname_candidates.add(local_addr.split(".")[0])
+                                logger.info(f"Found hostname candidate from network: {local_addr}")
                         
                 except Exception as e:
                     logger.warning(f"Could not extract macOS usernames from memory JSON: {e}")
                 
-                # Set usernames
+                # If we found usernames, use them
                 if usernames_set:
                     usernames_list = sorted(list(usernames_set))
                     logger.info(f"Successfully extracted {len(usernames_list)} username(s): {usernames_list}")
                 else:
+                    # Fallback: assume there's at least one user
                     usernames_list = ["macuser"]
                     logger.warning("No usernames extracted, using default 'macuser'")
                 
@@ -495,7 +489,20 @@ class AutomatedAnalyzer:
                     hostname = "Mac"
                     logger.warning("No hostname found, using default 'Mac'")
                 
-                logger.info(f"macOS extraction complete - hostname: {hostname}, users: {usernames_list}, os: {os_version}, arch: {architecture}")
+                # If OS version is still just "macOS", try to infer from process patterns
+                if os_version == "macOS" and processes:
+                    # Check for common macOS system processes to infer version
+                    process_names = [str(p.get("ImageFileName", "") or p.get("comm", "")).lower() for p in processes]
+                    
+                    # macOS version hints based on process patterns
+                    if "notificationcenter" in process_names or "controlcenter" in process_names:
+                        os_version = "macOS 11+ (Big Sur or later)"
+                    elif "spotlight" in process_names or "notifyd" in process_names:
+                        os_version = "macOS 10.14+ (Mojave or later)"
+                    else:
+                        os_version = "macOS (version unknown)"
+                
+                logger.info(f"macOS extraction complete - hostname: {hostname}, users: {usernames_list}, os: {os_version}")
                 
                 self.analysis_results["system_info"] = {
                     "computer_name": hostname,
@@ -505,7 +512,6 @@ class AutomatedAnalyzer:
                     "plugin_output": [],
                     "architecture": architecture
                 }
-            
             
             # === FALLBACK FOR UNKNOWN OS ===
             else:
