@@ -68,11 +68,13 @@ class VASTAnalyzer:
         cmd = [sys.executable, str(script_path)] + args
         
         try:
+            # FIXED: Removed timeout to match memory_extractor.py and file_extractor.py
+            # For large Linux dumps, this can take 30+ minutes
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600  # 10 minute timeout
+                timeout=None  # NO TIMEOUT - allow unlimited time for large dumps
             )
             
             if result.returncode == 0:
@@ -107,11 +109,6 @@ class VASTAnalyzer:
         Returns:
             Dictionary containing analysis results and file paths
         """
-        # Convert to list if single file
-        if isinstance(snapshot_files, Path):
-            file_list = [snapshot_files]
-        else:
-            file_list = list(snapshot_files)
         # Convert to list if single file
         if isinstance(snapshot_files, Path):
             file_list = [snapshot_files]
@@ -177,7 +174,7 @@ class VASTAnalyzer:
             
             # Step 2: Extract memory artifacts (28% total - 14% for this step)
             if extract_processes or extract_network:
-                self._update_progress("Extracting memory artifacts (processes, network)...", 0.14)
+                self._update_progress("Extracting memory artifacts (processes, network)... This may take 10-30 minutes for large dumps", 0.14)
                 success, output = self._run_script(
                     "memory_extractor.py",
                     [
@@ -199,7 +196,7 @@ class VASTAnalyzer:
             
             # Step 3: Extract file artifacts (42% total - 14% for this step)
             if extract_files or extract_registry:
-                self._update_progress("Extracting file and registry artifacts...", 0.28)
+                self._update_progress("Extracting file and registry artifacts... This may take 10-30 minutes", 0.28)
                 success, output = self._run_script(
                     "file_extractor.py",
                     [
@@ -298,7 +295,7 @@ class VASTAnalyzer:
         report = {
             "vast_version": "1.0",
             "timestamp": datetime.now().isoformat(),
-            "input_snapshots": [str(f) for f in snapshot_files],  # List all input files
+            "input_snapshots": [str(f) for f in snapshot_files],
             "os_type": os_type,
             "session_dir": results["session_dir"],
             "files": {
@@ -443,7 +440,7 @@ class VASTAnalyzer:
 
 # Convenience function for dashboard
 def run_analysis(
-    snapshot_files,  # Can be a single path string or list of Path objects
+    snapshot_files,
     os_type: str,
     options: Dict[str, bool],
     progress_callback: Optional[Callable] = None
@@ -472,7 +469,7 @@ def run_analysis(
         files = [Path(f) for f in snapshot_files]
     
     return analyzer.analyze_snapshot(
-        snapshot_files=files,  # Pass list of files
+        snapshot_files=files,
         os_type=os_type,
         extract_processes=options.get("extract_processes", True),
         extract_network=options.get("extract_network", True),
