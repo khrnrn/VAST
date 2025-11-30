@@ -62,8 +62,8 @@ class FileActivityExtractor:
                 f"Place vol.py in the same folder or pass --vol-path."
             )
 
-        if self.os_type not in ("windows", "linux"):
-            self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows' or 'linux'.")
+        if self.os_type not in ("windows", "linux", "macos"):
+            self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows', 'linux', or 'macos'.")
 
     def _run_volatility(
         self,
@@ -90,12 +90,16 @@ class FileActivityExtractor:
             "json",
         ]
 
-        # Inject Linux ISF — NO trailing spaces!
+        # Inject symbol files for Linux and macOS
         effective_extra_args = extra_global_args.copy()
         if self.os_type == "linux":
             has_isf = any(arg == "-u" for arg in effective_extra_args)
             if not has_isf:
                 effective_extra_args = ["-u", "https://raw.githubusercontent.com/leludo84/vol3-linux-profiles/main/banners-isf.json"] + effective_extra_args
+        elif self.os_type == "macos":
+            has_isf = any(arg == "-u" for arg in effective_extra_args)
+            if not has_isf:
+                effective_extra_args = ["-u", "https://github.com/Abyss-W4tcher/volatility3-symbols/raw/master/banners/banners.json"] + effective_extra_args
 
         cmd.extend(effective_extra_args)
         cmd.append(plugin)
@@ -110,7 +114,6 @@ class FileActivityExtractor:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
-                # NO TIMEOUT
             )
         except Exception as e:
             msg = f"Failed to execute Volatility: {e}"
@@ -152,32 +155,90 @@ class FileActivityExtractor:
                 return []
 
             entries = []
-            if isinstance(data, dict):
-                if "rows" in data:
-                    columns = data.get("columns", [])
-                    for row in data["rows"]:
-                        entry = dict(zip(columns, row))
-                        entries.append(entry)
-                elif "entries" in data:
-                    entries = data["entries"]
-                else:
-                    entries = list(data.values())
+            if isinstance(data, dict) and "__children" in data:
+                entries = data["__children"]
             elif isinstance(data, list):
                 entries = data
+            elif isinstance(data, dict):
+                entries = list(data.values())
 
             normalized = []
             for item in entries:
                 if not isinstance(item, dict):
                     continue
                 normalized.append({
-                    "FileName": item.get("path", item.get("Path", "")),
-                    "PID": item.get("pid", item.get("PID", 0)),
-                    "FD": item.get("fd", item.get("FD", "")),
-                    "Type": item.get("type", item.get("Type", "")),
-                    "Offset": item.get("inode", item.get("Inode", "")),
-                    "Process": item.get("process", item.get("Process", "")),
+                    "FileName": item.get("path") or item.get("Path") or item.get("full_path", ""),
+                    "PID": item.get("pid") or item.get("PID") or item.get("task_tgid", 0),
+                    "FD": item.get("fd") or item.get("FD") or item.get("fd_num", ""),
+                    "Type": item.get("type") or item.get("Type") or item.get("inode_type", ""),
+                    "Offset": item.get("inode") or item.get("Inode") or item.get("inode_num", ""),
+                    "Process": item.get("process") or item.get("Process") or item.get("task_comm", ""),
                 })
             return normalized
+        
+        elif self.os_type == "macos":
+            plugin = "mac.lsof.Lsof"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("macOS file object extraction (lsof) failed.")
+                return []
+
+            # DEBUG: Log data structure
+            logger.info("macOS lsof data type: %s", type(data))
+            if isinstance(data, dict):
+                logger.info("Data keys: %s", list(data.keys()))
+                if "__children" in data:
+                    logger.info("Found %d children", len(data["__children"]))
+                    if data["__children"]:
+                        logger.info("First child sample: %s", data["__children"][0])
+
+            entries = []
+            if isinstance(data, dict) and "__children" in data:
+                # Volatility 3 TreeGrid structure
+                entries = data["__children"]
+            elif isinstance(data, list):
+                entries = data
+            elif isinstance(data, dict):
+                entries = list(data.values())
+
+            normalized = []
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                
+                # Volatility 3 macOS lsof columns: "PID", "File Descriptor", "File Path"
+                file_path = (
+                    item.get("File Path") or 
+                    item.get("path") or 
+                    item.get("Path") or 
+                    ""
+                )
+                
+                pid = (
+                    item.get("PID") or 
+                    item.get("pid") or 
+                    0
+                )
+                
+                fd = (
+                    item.get("File Descriptor") or 
+                    item.get("fd") or 
+                    item.get("FD") or 
+                    ""
+                )
+                
+                normalized.append({
+                    "FileName": file_path,
+                    "PID": int(pid) if pid else 0,
+                    "FD": str(fd),
+                    "Type": "file",  # macOS lsof doesn't return type
+                    "Offset": "",  # macOS lsof doesn't return inode in standard output
+                    "Process": "",  # Process name not included in basic lsof output
+                })
+            
+            logger.info("Successfully normalized %d macOS file objects", len(normalized))
+            return normalized
+        
         else:
             plugin = "windows.filescan.FileScan"
             data = self._run_volatility(plugin)
@@ -188,7 +249,7 @@ class FileActivityExtractor:
 
     def extract_file_handles(self) -> Any:
         logger.info("Extracting file handles...")
-        if self.os_type == "linux":
+        if self.os_type in ("linux", "macos"):
             return self.extract_file_objects()
         else:
             plugin = "windows.handles.Handles"
@@ -205,7 +266,7 @@ class FileActivityExtractor:
             return data
 
     def extract_registry_activity(self) -> Any:
-        if self.os_type == "linux":
+        if self.os_type in ("linux", "macos"):
             return {}
         logger.info("Extracting registry activity...")
         registry_data = {}
@@ -224,9 +285,13 @@ class FileActivityExtractor:
         return registry_data
 
     def extract_bash_history(self) -> Any:
-        if self.os_type != "linux":
+        if self.os_type == "linux":
+            plugin = "linux.bash.Bash"
+        elif self.os_type == "macos":
+            plugin = "mac.bash.Bash"
+        else:
             return []
-        plugin = "linux.bash.Bash"
+        
         data = self._run_volatility(plugin)
         if data is None:
             return []
@@ -245,7 +310,6 @@ class FileActivityExtractor:
         elif isinstance(data, list):
             entries = data
 
-        # Return list of command strings or full dicts
         result = []
         for e in entries:
             if isinstance(e, dict):
@@ -258,7 +322,7 @@ class FileActivityExtractor:
 
     def extract_recent_files(self) -> Any:
         logger.info("Extracting recent files...")
-        if self.os_type == "linux":
+        if self.os_type in ("linux", "macos"):
             return self.extract_bash_history()
         else:
             plugin = "windows.registry.printkey.PrintKey"
@@ -272,7 +336,7 @@ class FileActivityExtractor:
             return recent_docs
 
     def extract_prefetch(self) -> Any:
-        if self.os_type == "linux":
+        if self.os_type in ("linux", "macos"):
             return []
         logger.info("Extracting prefetch data...")
         plugin = "windows.filescan.FileScan"
@@ -321,7 +385,7 @@ def main(argv: List[str]) -> int:
 
     parser = argparse.ArgumentParser(description="File Activity Extractor")
     parser.add_argument("raw_file", help="Path to raw memory dump")
-    parser.add_argument("--os", default="windows", help="Guest OS type")
+    parser.add_argument("--os", default="windows", help="Guest OS type (windows/linux/macos)")
     parser.add_argument("--vol-path", default=None, help="Path to vol.py")
     parser.add_argument("--output", default=None, help="Output JSON path")
     parser.add_argument("--session", help="Session directory")
@@ -369,4 +433,4 @@ def main(argv: List[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main(sys.argv[1:]))    

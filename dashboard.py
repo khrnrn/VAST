@@ -138,8 +138,10 @@ def extract_snapshot_metadata(display_results, automated_results=None):
 
     # macOS
     elif any("Darwin Kernel" in str(item.get('Value', '')) for item in plugin_output):
-        kernel_line = next((item['Value'] for item in plugin_output if "Darwin Kernel" in str(item.get('Value', ''))), "")
-        metadata['os_version'] = kernel_line.strip()
+        kernel_line = next((item['Value'] for item in plugin_output 
+                        if "Darwin Kernel" in str(item.get('Value', ''))), "")
+        if kernel_line:
+            metadata['os_version'] = kernel_line.strip()
         metadata['os_type'] = "macOS"
 
     # Fallback
@@ -179,6 +181,8 @@ with tab1:
         # Clear instructions for multiple file upload
         if os_type == "Linux":
             st.info("**Linux requires 2 files:** Select both .vmem AND .vmsn files (hold Cmd/Ctrl to select multiple)")
+        elif os_type == "macOS":
+            st.info("**macOS:** Upload .vmem, .raw, or .sav file")
         
         uploaded_files = st.file_uploader(
             "Choose snapshot file(s)" if os_type != "Linux" else "Choose BOTH .vmem and .vmsn files",
@@ -243,7 +247,7 @@ with tab1:
         elif os_type == "Windows":
             st.info("Windows needs .vmem or .raw file")
         else:
-            st.info("macOS needs .raw or .vmem file")
+            st.info("macOS needs .vmem AND .vmsn  file")
 
 
     st.markdown("---")
@@ -490,76 +494,175 @@ with tab2:
         st.markdown("---")
         
         # EVENT TIMELINE
-        st.subheader(" Event Timeline")
-        
+        st.subheader("⏱️ Event Timeline")
+
         st.markdown("""
         <div style='background: linear-gradient(90deg, #1e3a8a 0%, #7c3aed 100%);
                     padding: 15px; border-radius: 10px; margin-bottom: 20px;'>
-            <h4 style='color: white; margin: 0;'> Chronological Event Sequence</h4>
+            <h4 style='color: white; margin: 0;'>📊 Chronological Event Sequence</h4>
         </div>
         """, unsafe_allow_html=True)
-        
+
         timeline_events = []
-        
+
+        # Helper function to safely get process name
+        def get_process_name(proc):
+            """Extract process name with multiple fallback options"""
+            name = (
+                proc.get("ImageFileName") or 
+                proc.get("comm") or 
+                proc.get("COMM") or
+                proc.get("name") or
+                proc.get("Name") or
+                None
+            )
+            
+            if name and name != "Unknown":
+                return str(name)
+            
+            # Last resort: check if there's any string value in the dict
+            for key, value in proc.items():
+                if isinstance(value, str) and value and len(value) > 0 and key.lower() in ['image', 'process', 'command', 'executable']:
+                    return str(value)
+            
+            return "Unknown Process"
+
+        # Helper function to safely get PID
+        def get_pid(proc):
+            """Extract PID with fallback options"""
+            pid = proc.get('PID') or proc.get('pid') or proc.get('Pid')
+            return pid if pid is not None else 'N/A'
+
+        # Helper function to safely get PPID
+        def get_ppid(proc):
+            """Extract PPID with fallback options"""
+            ppid = proc.get('PPID') or proc.get('ppid') or proc.get('Ppid')
+            return ppid if ppid is not None else 'N/A'
+
         # Add processes to timeline
         for i, proc in enumerate(procs[:30]):
+            if not isinstance(proc, dict):
+                continue
+            
+            proc_name = get_process_name(proc)
+            pid = get_pid(proc)
+            ppid = get_ppid(proc)
+            
+            # Debug: Print first process to see structure
+            if i == 0:
+                st.info(f"🔍 Debug - First process keys: {list(proc.keys())}")
+            
             timeline_events.append({
                 'seq': i,
-                'type': ' Process',
-                'name': str(proc.get("ImageFileName") or proc.get("comm", "Unknown"))[:50],
-                'details': f"PID: {proc.get('PID') or proc.get('pid', 'N/A')} | PPID: {proc.get('PPID') or proc.get('ppid', 'N/A')}",
+                'type': '⚙️ Process',
+                'name': proc_name[:50],
+                'details': f"PID: {pid} | PPID: {ppid}",
                 'suspicious': proc.get('suspicious_score', 0),
                 'time': f"Event #{i+1}"
             })
-        
-        # Add network connections to timeline
+
+          # Add network connections to timeline
         offset = len(timeline_events)
         for i, conn in enumerate(conns[:30]):
+            if not isinstance(conn, dict):
+                continue
+            
+            local_addr = str(conn.get('LocalAddr', '0.0.0.0'))
+            local_port = conn.get('LocalPort', 0)
+            foreign_addr = str(conn.get('ForeignAddr', '0.0.0.0'))
+            foreign_port = conn.get('ForeignPort', 0)
+            proto = conn.get('Proto', 'TCP')
+            state = conn.get('State', '')
+            owner = conn.get('Owner', 'Unknown')
+            
+            # Determine display format based on connection type
+            if foreign_addr in ['0.0.0.0', '::'] or not foreign_port:
+                # Listening/Local connection
+                display_name = f"Port {local_port}"
+                details = f"{proto} | Listening on {local_addr}:{local_port} | Process: {owner}"
+            else:
+                # External connection
+                display_name = f"{foreign_addr}:{foreign_port}"
+                details = f"{proto} | {local_addr}:{local_port} → {foreign_addr}:{foreign_port}"
+                if state:
+                    details += f" | {state}"
+                if owner and owner != 'Unknown':
+                    details += f" | {owner}"
+            
             timeline_events.append({
                 'seq': offset + i,
-                'type': ' Network',
-                'name': f"{conn.get('ForeignAddr', 'Unknown')}:{conn.get('ForeignPort', '')}",
-                'details': f"Protocol: {conn.get('Proto', 'TCP')} | State: {conn.get('State', 'N/A')}",
+                'type': '🌐 Network',
+                'name': display_name,
+                'details': details,
                 'suspicious': conn.get('suspicious_score', 0),
                 'time': f"Event #{offset+i+1}"
             })
-        
+
         # Add files to timeline
         offset = len(timeline_events)
         for i, file in enumerate(files[:20]):
+            if not isinstance(file, dict):
+                continue
+            
+            file_name = (
+                file.get("FileName") or 
+                file.get("Name") or 
+                file.get("path") or
+                file.get("Path") or
+                "Unknown File"
+            )
+            
             timeline_events.append({
                 'seq': offset + i,
-                'type': ' File',
-                'name': str(file.get("FileName") or file.get("Name", "Unknown"))[:50],
-                'details': f"Offset: {file.get('Offset', 'N/A')}",
+                'type': '📁 File',
+                'name': str(file_name)[:50],
+                'details': f"Offset: {file.get('Offset', file.get('offset', file.get('inode', 'N/A')))}",
                 'suspicious': 0,
                 'time': f"Event #{offset+i+1}"
             })
-        
+
         # Display timeline cards
         if timeline_events:
+            # Show debug info
+            st.info(f"📊 Timeline generated: {len(timeline_events)} events ({len([e for e in timeline_events if e['type'] == '⚙️ Process'])} processes, {len([e for e in timeline_events if e['type'] == '🌐 Network'])} connections, {len([e for e in timeline_events if e['type'] == '📁 File'])} files)")
+            
             for event in timeline_events[:50]: # Show first 50 events
-                susp_badge = " HIGH RISK" if event['suspicious'] >= 7 else ("🟡 MEDIUM" if event['suspicious'] >= 4 else ("🟢 LOW" if event['suspicious'] > 0 else ""))
+                susp_badge = "🔴 HIGH RISK" if event['suspicious'] >= 7 else ("🟡 MEDIUM" if event['suspicious'] >= 4 else ("🟢 LOW" if event['suspicious'] > 0 else ""))
                 
                 with st.expander(f"{event['time']} - {event['type']}: {event['name']} {susp_badge}", expanded=False):
                     st.markdown(f"**Details:** {event['details']}")
                     if event['suspicious'] > 0:
-                        st.warning(f" Suspicion Score: {event['suspicious']}/10")
+                        st.warning(f"⚠️ Suspicion Score: {event['suspicious']}/10")
         else:
             st.info("No events to display in timeline")
-        
         st.markdown("---")
         
         # PROCESS TABLE
-        st.subheader(" Process Analysis")
+        st.subheader("⚙️ Process Analysis")
         if procs:
-            procs_df = pd.DataFrame(procs)
-            if '__children' in procs_df.columns:
-                procs_df = procs_df.drop(columns=['__children'])
+            # Create clean dataframe
+            procs_display = []
+            for p in procs:
+                if isinstance(p, dict):
+                    procs_display.append({
+                        'Process': get_process_name(p),
+                        'PID': get_pid(p),
+                        'PPID': get_ppid(p),
+                        'Threads': p.get('Threads', p.get('threads', 'N/A')),
+                        'User': p.get('User', p.get('user', p.get('uid', 'N/A'))),
+                        'Suspicion': p.get('suspicious_score', 0)
+                    })
             
-            with st.expander(" All Processes Table", expanded=False):
-                st.dataframe(procs_df, use_container_width=True, height=400)
-                st.download_button(" Download CSV", procs_df.to_csv(index=False), "processes.csv")
+            if procs_display:
+                procs_df = pd.DataFrame(procs_display)
+                
+                with st.expander("📋 All Processes Table", expanded=False):
+                    st.dataframe(procs_df, use_container_width=True, height=400)
+                    st.download_button("💾 Download CSV", procs_df.to_csv(index=False), "processes.csv")
+            else:
+                st.warning("⚠️ Process data exists but couldn't be displayed. Check data format.")
+        else:
+            st.info("ℹ️ No process data available")
         
         st.markdown("---")
         
@@ -772,12 +875,17 @@ with tab3:
                     files_df['Extension'] = files_df[name_col].astype(str).str.extract(r'\.([^.]+)$')[0]
                     ext_counts = files_df['Extension'].value_counts().head(10)
                         
+                                        
+                    ext_df = pd.DataFrame({
+                        'Extension': ext_counts.index,
+                        'Count': ext_counts.values
+                    })
                     fig_ext = px.bar(
-                        x=ext_counts.index,
-                        y=ext_counts.values,
+                        ext_df,
+                        x='Extension',
+                        y='Count',
                         title='Top 10 File Extensions',
-                        labels={'x': 'Extension', 'y': 'Count'},
-                        color=ext_counts.values,
+                        color='Count',
                         color_continuous_scale='Greens'
                     )
                     fig_ext.update_layout(template='plotly_dark', height=300)
@@ -992,31 +1100,43 @@ with tab3:
             )
 
 # TAB 4 - COMPREHENSIVE FORENSICS
+# TAB 4 - COMPREHENSIVE FORENSICS
 with tab4:
-    st.title("Deep Forensics Analysis")
+    st.title("🔍 Deep Forensics Analysis")
     
     if not st.session_state.analysis_complete:
-        st.info("Complete analysis first to view deep forensics")
+        st.info("ℹ️ Complete analysis first to view deep forensics")
     else:
         results = st.session_state.analysis_results
         procs = results.get('processes', [])
         conns = results.get('connections', [])
         files = results.get('file_objects', [])
         
+        # Get OS type
+        os_type = st.session_state.get('os_type', 'Unknown')
+        
         # 4 Analysis sections with radio buttons
         analysis_section = st.radio("Analysis Section:", 
-                                    ["Process Investigation", "Network Forensics", "System Artifacts", "Threat Indicators"],
+                                    ["🔎 Process Investigation", "🌐 Network Forensics", "📦 System Artifacts", "⚠️ Threat Indicators"],
                                     horizontal=True)
         
         st.markdown("---")
         
         # SECTION 1: PROCESS INVESTIGATION
-        if analysis_section == "Process Investigation":
-            st.markdown("### Process Investigation")
+        if analysis_section == "🔎 Process Investigation":
+            st.markdown("### 🔎 Process Investigation")
             
-            # Process Statistics
+            # Process Statistics (OS-aware)
             total_procs = len(procs)
-            system_procs = len([p for p in procs if p.get('User', '').startswith('NT AUTHORITY')])
+            
+            # Detect system vs user processes based on OS
+            if os_type.lower() == "windows":
+                system_procs = len([p for p in procs if 'NT AUTHORITY' in str(p.get('User', '')) or 'SYSTEM' in str(p.get('User', ''))])
+            elif os_type.lower() in ["linux", "macos"]:
+                system_procs = len([p for p in procs if p.get('User') in ['0', 0, 'root', 'Unknown']])
+            else:
+                system_procs = 0
+            
             user_procs = total_procs - system_procs
             terminated = len([p for p in procs if p.get('ExitTime')])
             
@@ -1029,103 +1149,132 @@ with tab4:
             st.markdown("---")
             
             # Parent-Child Relationships
-            st.markdown("#### Parent-Child Process Trees")
+            st.markdown("#### 👨‍👧‍👦 Parent-Child Process Trees")
             
             # Build parent-child map
             parent_child_map = {}
             for p in procs:
-                ppid = p.get('PPID')
-                if ppid:
-                    if ppid not in parent_child_map:
-                        parent_child_map[ppid] = []
-                    parent_child_map[ppid].append(p)
+                if isinstance(p, dict):
+                    ppid = p.get('PPID') or p.get('ppid')
+                    if ppid is not None:
+                        if ppid not in parent_child_map:
+                            parent_child_map[ppid] = []
+                        parent_child_map[ppid].append(p)
             
             col_tree1, col_tree2 = st.columns(2)
             
             with col_tree1:
                 st.markdown("**Key Parent Processes**")
-                key_parents = ['explorer.exe', 'services.exe', 'winlogon.exe', 'wininit.exe']
+                
+                # Define key processes per OS
+                if os_type.lower() == "windows":
+                    key_parents = ['explorer.exe', 'services.exe', 'winlogon.exe', 'wininit.exe']
+                elif os_type.lower() == "linux":
+                    key_parents = ['systemd', 'init', 'kthreadd']
+                elif os_type.lower() == "macos":
+                    key_parents = ['launchd', 'kernel_task']
+                else:
+                    key_parents = []
+                
                 for parent_name in key_parents:
-                    parent_proc = next((p for p in procs if parent_name.lower() in str(p.get('ImageFileName', '')).lower()), None)
+                    parent_proc = next((p for p in procs if parent_name.lower() in str(p.get('ImageFileName', '') or p.get('comm', '')).lower()), None)
                     if parent_proc:
-                        parent_pid = parent_proc.get('PID')
+                        parent_pid = parent_proc.get('PID') or parent_proc.get('pid')
                         children = parent_child_map.get(parent_pid, [])
-                        with st.expander(f"{parent_name} (PID: {parent_pid}) - {len(children)} children"):
+                        with st.expander(f"📁 {parent_name} (PID: {parent_pid}) - {len(children)} children"):
                             if children:
                                 for child in children[:10]:
-                                    st.write(f"└─ {child.get('ImageFileName', 'Unknown')} (PID: {child.get('PID')})")
+                                    child_name = child.get('ImageFileName') or child.get('comm', 'Unknown')
+                                    child_pid = child.get('PID') or child.get('pid')
+                                    st.write(f"  └─ {child_name} (PID: {child_pid})")
                             else:
                                 st.info("No child processes")
             
             with col_tree2:
                 st.markdown("**Suspicious Process Trees**")
-                suspicious_parents = ['cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe']
+                
+                # Define suspicious processes per OS
+                if os_type.lower() == "windows":
+                    suspicious_parents = ['cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe']
+                elif os_type.lower() == "linux":
+                    suspicious_parents = ['bash', 'sh', 'nc', 'netcat']
+                elif os_type.lower() == "macos":
+                    suspicious_parents = ['bash', 'sh', 'osascript', 'python']
+                else:
+                    suspicious_parents = []
+                
                 for parent_name in suspicious_parents:
-                    parent_procs = [p for p in procs if parent_name.lower() in str(p.get('ImageFileName', '')).lower()]
+                    parent_procs = [p for p in procs if parent_name.lower() in str(p.get('ImageFileName', '') or p.get('comm', '')).lower()]
                     for parent_proc in parent_procs[:5]:
-                        parent_pid = parent_proc.get('PID')
+                        parent_pid = parent_proc.get('PID') or parent_proc.get('pid')
                         children = parent_child_map.get(parent_pid, [])
                         if children:
                             with st.expander(f"⚠️ {parent_name} (PID: {parent_pid}) - {len(children)} children", expanded=False):
                                 for child in children[:10]:
-                                    st.write(f"└─ {child.get('ImageFileName', 'Unknown')} (PID: {child.get('PID')})")
+                                    child_name = child.get('ImageFileName') or child.get('comm', 'Unknown')
+                                    child_pid = child.get('PID') or child.get('pid')
+                                    st.write(f"  └─ {child_name} (PID: {child_pid})")
             
             st.markdown("---")
             
             # Short-lived processes
-            st.markdown("#### Short-Lived Processes")
+            st.markdown("#### ⏱️ Short-Lived Processes")
             short_lived = [p for p in procs if p.get('ExitTime')]
             
             if short_lived:
                 short_df = pd.DataFrame([{
-                    'Process': p.get('ImageFileName', 'Unknown'),
-                    'PID': p.get('PID'),
-                    'PPID': p.get('PPID'),
-                    'Start Time': p.get('CreateTime'),
-                    'Exit Time': p.get('ExitTime'),
+                    'Process': p.get('ImageFileName') or p.get('comm', 'Unknown'),
+                    'PID': p.get('PID') or p.get('pid'),
+                    'PPID': p.get('PPID') or p.get('ppid'),
+                    'Start Time': p.get('CreateTime', 'N/A'),
+                    'Exit Time': p.get('ExitTime', 'N/A'),
                     'Suspicion Score': p.get('suspicious_score', 0)
                 } for p in short_lived[:20]])
                 st.dataframe(short_df, height=300)
-                st.download_button("Download CSV", short_df.to_csv(index=False), "short_lived_processes.csv")
+                st.download_button("💾 Download CSV", short_df.to_csv(index=False), "short_lived_processes.csv")
             else:
-                st.info("No terminated processes detected")
+                st.info("ℹ️ No terminated processes detected")
             
             st.markdown("---")
             
             # Process Lookup
-            st.markdown("#### Process Lookup")
+            st.markdown("#### 🔍 Process Lookup")
             search_term = st.text_input("Search by process name or PID:")
             
             if search_term:
                 matches = [p for p in procs if 
-                          search_term.lower() in str(p.get('ImageFileName', '')).lower() or
-                          search_term in str(p.get('PID', ''))]
+                          search_term.lower() in str(p.get('ImageFileName', '') or p.get('comm', '')).lower() or
+                          search_term in str(p.get('PID') or p.get('pid', ''))]
                 
                 if matches:
-                    st.success(f"Found {len(matches)} matches")
+                    st.success(f"✅ Found {len(matches)} matches")
                     for match in matches[:10]:
-                        with st.expander(f"{match.get('ImageFileName', 'Unknown')} (PID: {match.get('PID')})"):
+                        proc_name = match.get('ImageFileName') or match.get('comm', 'Unknown')
+                        proc_pid = match.get('PID') or match.get('pid')
+                        with st.expander(f"📋 {proc_name} (PID: {proc_pid})"):
                             col_a, col_b, col_c = st.columns(3)
-                            col_a.write(f"**PID:** {match.get('PID')}")
-                            col_b.write(f"**PPID:** {match.get('PPID')}")
-                            col_c.write(f"**Threads:** {match.get('Threads', 'N/A')}")
-                            st.write(f"**Path:** {match.get('ImagePath', 'N/A')}")
-                            st.write(f"**User:** {match.get('User', 'N/A')}")
+                            col_a.write(f"**PID:** {proc_pid}")
+                            col_b.write(f"**PPID:** {match.get('PPID') or match.get('ppid')}")
+                            col_c.write(f"**Threads:** {match.get('Threads', match.get('threads', 'N/A'))}")
+                            st.write(f"**Path:** {match.get('ImagePath', match.get('path', 'N/A'))}")
+                            st.write(f"**User:** {match.get('User', match.get('user', match.get('uid', 'N/A')))}")
                             st.write(f"**Created:** {match.get('CreateTime', 'N/A')}")
                             if match.get('suspicious_score', 0) > 0:
-                                st.warning(f"Suspicion Score: {match.get('suspicious_score')}")
+                                st.warning(f"⚠️ Suspicion Score: {match.get('suspicious_score')}")
                 else:
-                    st.warning("No matches found")
+                    st.warning("⚠️ No matches found")
         
         # SECTION 2: NETWORK FORENSICS
-        elif analysis_section == "Network Forensics":
-            st.markdown("### Network Forensics")
+        elif analysis_section == "🌐 Network Forensics":
+            st.markdown("### 🌐 Network Forensics")
             
             # Connection Statistics
             total_conns = len(conns)
-            established = len([c for c in conns if c.get('State') == 'ESTABLISHED'])
-            listening = len([c for c in conns if c.get('State') == 'LISTENING'])
-            closed = len([c for c in conns if c.get('State') == 'CLOSED'])
+            
+            # Count connection states
+            established = len([c for c in conns if str(c.get('State', '')).upper() == 'ESTABLISHED'])
+            listening = len([c for c in conns if str(c.get('State', '')).upper() in ['LISTENING', 'LISTEN']])
+            closed = len([c for c in conns if str(c.get('State', '')).upper() in ['CLOSED', 'CLOSE_WAIT', 'TIME_WAIT']])
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Connections", total_conns)
@@ -1136,24 +1285,27 @@ with tab4:
             st.markdown("---")
             
             # Connection State Distribution
-            st.markdown("#### Connection State Distribution")
+            st.markdown("#### 📊 Connection State Distribution")
             if conns:
                 state_counts = {}
                 for c in conns:
                     state = c.get('State', 'UNKNOWN')
+                    if not state or state == '':
+                        state = 'UNKNOWN'
                     state_counts[state] = state_counts.get(state, 0) + 1
                 
                 col_chart, col_table = st.columns(2)
                 
                 with col_chart:
-                    fig = px.pie(
-                        names=list(state_counts.keys()),
-                        values=list(state_counts.values()),
-                        title='Connection States',
-                        hole=0.4
-                    )
-                    fig.update_layout(template='plotly_dark', height=400)
-                    st.plotly_chart(fig, use_container_width=True)
+                    if len(state_counts) > 0:
+                        fig = px.pie(
+                            names=list(state_counts.keys()),
+                            values=list(state_counts.values()),
+                            title='Connection States',
+                            hole=0.4
+                        )
+                        fig.update_layout(template='plotly_dark', height=400)
+                        st.plotly_chart(fig, use_container_width=True)
                 
                 with col_table:
                     state_df = pd.DataFrame(list(state_counts.items()), columns=['State', 'Count'])
@@ -1162,7 +1314,7 @@ with tab4:
             st.markdown("---")
             
             # IP Address Analysis
-            st.markdown("#### IP Address Analysis")
+            st.markdown("#### 🌍 IP Address Analysis")
             
             ip_tabs = st.tabs(["External IPs", "Private IPs", "Suspicious Ports"])
             
@@ -1170,10 +1322,12 @@ with tab4:
                 st.markdown("**Top External IPs**")
                 external_ips = {}
                 for c in conns:
-                    foreign = c.get('ForeignAddr', '')
-                    if foreign and not foreign.startswith(('127.', '0.0.0.0', '::')) and ':' in foreign:
-                        ip = foreign.split(':')[0]
-                        if not any(ip.startswith(prefix) for prefix in ['10.', '192.168.', '172.']):
+                    foreign = str(c.get('ForeignAddr', ''))
+                    if foreign and foreign not in ['0.0.0.0', '::', '', 'None']:
+                        # Remove port if present
+                        ip = foreign.split(':')[0] if ':' in foreign else foreign
+                        # Filter out private IPs
+                        if not any(ip.startswith(prefix) for prefix in ['10.', '192.168.', '127.', '172.', 'fe80', 'fd', 'fc']):
                             external_ips[ip] = external_ips.get(ip, 0) + 1
                 
                 if external_ips:
@@ -1186,15 +1340,15 @@ with tab4:
                     
                     st.dataframe(ip_df, height=300)
                 else:
-                    st.info("No external connections found")
+                    st.info("ℹ️ No external connections found")
             
             with ip_tabs[1]:
                 st.markdown("**Private Network Connections**")
                 private_conns = []
                 for c in conns:
-                    foreign = c.get('ForeignAddr', '')
-                    if foreign and ':' in foreign:
-                        ip = foreign.split(':')[0]
+                    foreign = str(c.get('ForeignAddr', ''))
+                    if foreign:
+                        ip = foreign.split(':')[0] if ':' in foreign else foreign
                         if any(ip.startswith(prefix) for prefix in ['10.', '192.168.']) or any(ip.startswith(f'172.{i}.') for i in range(16, 32)):
                             private_conns.append({
                                 'Local': c.get('LocalAddr'),
@@ -1205,10 +1359,10 @@ with tab4:
                             })
                 
                 if private_conns:
-                    st.warning(f"Found {len(private_conns)} private network connections")
-                    st.dataframe(pd.DataFrame(private_conns), height=300)
+                    st.warning(f"⚠️ Found {len(private_conns)} private network connections")
+                    st.dataframe(pd.DataFrame(private_conns[:50]), height=300)
                 else:
-                    st.success("No private network connections detected")
+                    st.success("✅ No private network connections detected")
             
             with ip_tabs[2]:
                 st.markdown("**Suspicious Port Detection**")
@@ -1224,38 +1378,31 @@ with tab4:
                 
                 suspicious = []
                 for c in conns:
-                    foreign = c.get('ForeignAddr', '')
-                    if foreign and ':' in foreign:
-                        port = foreign.split(':')[1]
-                        if port in known_malware_ports:
-                            suspicious.append({
-                                'Port': port,
-                                'Type': known_malware_ports[port],
-                                'Remote': foreign,
-                                'Process': c.get('Owner', 'Unknown'),
-                                'PID': c.get('PID'),
-                                'State': c.get('State')
-                            })
-                        elif int(port) > 1024 and int(port) not in [80, 443, 53, 22, 3389]:
-                            suspicious.append({
-                                'Port': port,
-                                'Type': 'Non-standard high port',
-                                'Remote': foreign,
-                                'Process': c.get('Owner', 'Unknown'),
-                                'PID': c.get('PID'),
-                                'State': c.get('State')
-                            })
+                    local_port = str(c.get('LocalPort', ''))
+                    foreign_port = str(c.get('ForeignPort', ''))
+                    
+                    if local_port in known_malware_ports or foreign_port in known_malware_ports:
+                        port = local_port if local_port in known_malware_ports else foreign_port
+                        suspicious.append({
+                            'Port': port,
+                            'Type': known_malware_ports.get(port, 'Unknown'),
+                            'Local': c.get('LocalAddr'),
+                            'Remote': c.get('ForeignAddr'),
+                            'Process': c.get('Owner', 'Unknown'),
+                            'PID': c.get('PID'),
+                            'State': c.get('State')
+                        })
                 
                 if suspicious:
-                    st.error(f" Found {len(suspicious)} suspicious ports")
+                    st.error(f"🚨 Found {len(suspicious)} suspicious ports")
                     st.dataframe(pd.DataFrame(suspicious), height=300)
                 else:
-                    st.success("No suspicious ports detected")
+                    st.success("✅ No suspicious ports detected")
             
             st.markdown("---")
             
             # Process Network Activity
-            st.markdown("#### Process Network Activity")
+            st.markdown("#### 📡 Process Network Activity")
             process_conns = {}
             for c in conns:
                 owner = c.get('Owner', 'Unknown')
@@ -1267,13 +1414,14 @@ with tab4:
                         'IPs': set()
                     }
                 process_conns[owner]['Total'] += 1
-                if c.get('State') == 'ESTABLISHED':
+                if str(c.get('State', '')).upper() == 'ESTABLISHED':
                     process_conns[owner]['Established'] += 1
-                if c.get('State') == 'LISTENING':
+                if str(c.get('State', '')).upper() in ['LISTENING', 'LISTEN']:
                     process_conns[owner]['Listening'] += 1
                 foreign = c.get('ForeignAddr', '')
-                if foreign and ':' in foreign:
-                    process_conns[owner]['IPs'].add(foreign.split(':')[0])
+                if foreign and foreign not in ['0.0.0.0', '::']:
+                    ip = foreign.split(':')[0] if ':' in foreign else foreign
+                    process_conns[owner]['IPs'].add(ip)
             
             proc_net_df = pd.DataFrame([
                 {
@@ -1287,55 +1435,55 @@ with tab4:
             ]).sort_values('Total Connections', ascending=False)
             
             st.dataframe(proc_net_df, height=400)
-            st.download_button("Download CSV", proc_net_df.to_csv(index=False), "process_network_activity.csv")
+            st.download_button("💾 Download CSV", proc_net_df.to_csv(index=False), "process_network_activity.csv")
         
         # SECTION 3: SYSTEM ARTIFACTS
-        elif analysis_section == "System Artifacts":
-            st.markdown("### System Artifacts")
+        elif analysis_section == "📦 System Artifacts":
+            st.markdown("### 📦 System Artifacts")
             
             # System Configuration
-            st.markdown("#### System Configuration")
+            st.markdown("#### ⚙️ System Configuration")
             metadata = st.session_state.snapshot_info or {}
             
             col_sys1, col_sys2 = st.columns(2)
             
             with col_sys1:
                 st.markdown("**Device Information**")
-                st.write(f"* **Computer Name:** {metadata.get('computer_name', 'N/A')}")
-                st.write(f"* **Username:** {metadata.get('username', 'N/A')}")
-                st.write(f"* **OS Version:** {metadata.get('os_version', 'N/A')}")
+                st.write(f"🖥️ **Computer Name:** {metadata.get('computer_name', 'N/A')}")
+                st.write(f"👤 **Username:** {metadata.get('username', 'N/A')}")
+                st.write(f"💻 **OS Version:** {metadata.get('os_version', 'N/A')}")
             
             with col_sys2:
                 st.markdown("**Snapshot Details**")
-                st.write(f"* **File Size:** {metadata.get('size_gb', 'N/A')} GB")
-                st.write(f"* **Analysis Date:** {metadata.get('analysis_time', 'N/A')}")
-                st.write(f"* **OS Type:** {metadata.get('os_type', 'N/A')}")
+                st.write(f"📦 **File Size:** {metadata.get('size_gb', 'N/A')} GB")
+                st.write(f"📅 **Analysis Date:** {metadata.get('analysis_time', 'N/A')}")
+                st.write(f"🖥️ **OS Type:** {metadata.get('os_type', 'N/A')}")
             
             st.markdown("---")
             
             # Process Timeline
-            st.markdown("#### Process Creation Timeline")
-            timeline = sorted(procs, key=lambda x: x.get('CreateTime', ''))[:30]
+            st.markdown("#### ⏱️ Process Creation Timeline")
+            timeline = sorted([p for p in procs if p.get('CreateTime')], key=lambda x: x.get('CreateTime', ''))[:30]
             
             if timeline:
                 timeline_df = pd.DataFrame([{
                     'Time': p.get('CreateTime'),
-                    'Process': p.get('ImageFileName', 'Unknown'),
-                    'PID': p.get('PID'),
-                    'PPID': p.get('PPID'),
+                    'Process': p.get('ImageFileName') or p.get('comm', 'Unknown'),
+                    'PID': p.get('PID') or p.get('pid'),
+                    'PPID': p.get('PPID') or p.get('ppid'),
                     'User': p.get('User', 'N/A')
                 } for p in timeline])
                 st.dataframe(timeline_df, height=400)
             else:
-                st.info("Timeline data not available")
+                st.info("ℹ️ Timeline data not available")
             
             st.markdown("---")
             
             # File System Activity
-            st.markdown("#### File System Activity")
+            st.markdown("#### 📁 File System Activity")
             
-            exe_files = len([f for f in files if str(f.get('FileName', '')).lower().endswith('.exe')])
-            dll_files = len([f for f in files if str(f.get('FileName', '')).lower().endswith('.dll')])
+            exe_files = len([f for f in files if str(f.get('FileName', '') or f.get('Name', '')).lower().endswith('.exe')])
+            dll_files = len([f for f in files if str(f.get('FileName', '') or f.get('Name', '')).lower().endswith('.dll')])
             other_files = len(files) - exe_files - dll_files
             
             col1, col2, col3, col4 = st.columns(4)
@@ -1346,17 +1494,17 @@ with tab4:
             
             if files:
                 file_sample = pd.DataFrame([{
-                    'File Name': f.get('FileName', 'Unknown'),
-                    'Offset': f.get('Offset', 'N/A'),
+                    'File Name': f.get('FileName') or f.get('Name') or f.get('path', 'Unknown'),
+                    'Offset': f.get('Offset', f.get('offset', f.get('inode', 'N/A'))),
                     'Process': f.get('Process', 'N/A')
                 } for f in files[:50]])
                 st.dataframe(file_sample, height=300)
             else:
-                st.info("No file objects extracted")
+                st.info("ℹ️ No file objects extracted")
         
         # SECTION 4: THREAT INDICATORS
-        elif analysis_section == "Threat Indicators":
-            st.markdown("### Threat Indicators")
+        elif analysis_section == "⚠️ Threat Indicators":
+            st.markdown("### ⚠️ Threat Indicators")
             
             # Threat Summary
             high_risk = len([p for p in procs if p.get('suspicious_score', 0) >= 7])
@@ -1364,16 +1512,16 @@ with tab4:
             low_risk = len([p for p in procs if 1 <= p.get('suspicious_score', 0) < 4])
             
             col1, col2, col3 = st.columns(3)
-            col1.metric("High Risk", high_risk, delta="Critical" if high_risk > 0 else None)
-            col2.metric("Medium Risk", medium_risk, delta="Warning" if medium_risk > 0 else None)
-            col3.metric("Low Risk", low_risk)
+            col1.metric("🔴 High Risk", high_risk, delta="Critical" if high_risk > 0 else None)
+            col2.metric("🟡 Medium Risk", medium_risk, delta="Warning" if medium_risk > 0 else None)
+            col3.metric("🟢 Low Risk", low_risk)
             
             st.markdown("---")
             
             # Indicators of Compromise
-            st.markdown("#### Indicators of Compromise (IOCs)")
+            st.markdown("#### 🚨 Indicators of Compromise (IOCs)")
             
-            ioc_tabs = st.tabs(["Suspicious Processes", "Network IOCs", "Memory Indicators", "Persistence"])
+            ioc_tabs = st.tabs(["Suspicious Processes", "Network IOCs", "Memory Indicators"])
             
             with ioc_tabs[0]:
                 st.markdown("**Suspicious Processes**")
@@ -1381,21 +1529,26 @@ with tab4:
                 
                 if suspicious_procs:
                     for proc in suspicious_procs[:10]:
-                        severity = "CRITICAL" if proc.get('suspicious_score', 0) >= 7 else "WARNING"
-                        with st.expander(f"{severity} - {proc.get('ImageFileName', 'Unknown')} (PID: {proc.get('PID')})"):
-                            st.write(f"**Suspicion Score:** {proc.get('suspicious_score')}")
-                            st.write(f"**Parent PID:** {proc.get('PPID')}")
-                            st.write(f"**User:** {proc.get('User', 'N/A')}")
-                            st.write(f"**Path:** {proc.get('ImagePath', 'N/A')}")
+                        severity = "🔴 CRITICAL" if proc.get('suspicious_score', 0) >= 7 else "🟡 WARNING"
+                        proc_name = proc.get('ImageFileName') or proc.get('comm', 'Unknown')
+                        proc_pid = proc.get('PID') or proc.get('pid')
+                        
+                        with st.expander(f"{severity} - {proc_name} (PID: {proc_pid})"):
+                            st.write(f"**Suspicion Score:** {proc.get('suspicious_score')}/10")
+                            st.write(f"**Parent PID:** {proc.get('PPID') or proc.get('ppid')}")
+                            st.write(f"**User:** {proc.get('User', proc.get('user', proc.get('uid', 'N/A')))}")
+                            st.write(f"**Path:** {proc.get('ImagePath', proc.get('path', 'N/A'))}")
                             
                             # Check for children
-                            children = [p for p in procs if p.get('PPID') == proc.get('PID')]
+                            children = [p for p in procs if (p.get('PPID') or p.get('ppid')) == proc_pid]
                             if children:
-                                st.warning(f"Has {len(children)} child processes")
+                                st.warning(f"⚠️ Has {len(children)} child processes")
                                 for child in children[:5]:
-                                    st.write(f"  └─ {child.get('ImageFileName')} (PID: {child.get('PID')})")
+                                    child_name = child.get('ImageFileName') or child.get('comm', 'Unknown')
+                                    child_pid = child.get('PID') or child.get('pid')
+                                    st.write(f"  └─ {child_name} (PID: {child_pid})")
                 else:
-                    st.success("No highly suspicious processes detected")
+                    st.success("✅ No highly suspicious processes detected")
             
             with ioc_tabs[1]:
                 st.markdown("**Network-based IOCs**")
@@ -1403,84 +1556,46 @@ with tab4:
                 
                 network_iocs = []
                 for c in conns:
-                    foreign = c.get('ForeignAddr', '')
-                    if foreign and ':' in foreign:
-                        port = foreign.split(':')[1]
-                        if port in known_malware_ports:
-                            network_iocs.append({
-                                'IP': foreign.split(':')[0],
-                                'Port': port,
-                                'Process': c.get('Owner'),
-                                'State': c.get('State'),
-                                'Indicator': 'Known malware port'
-                            })
+                    foreign = str(c.get('ForeignAddr', ''))
+                    local_port = str(c.get('LocalPort', ''))
+                    foreign_port = str(c.get('ForeignPort', ''))
+                    
+                    if local_port in known_malware_ports or foreign_port in known_malware_ports:
+                        port = local_port if local_port in known_malware_ports else foreign_port
+                        ip = foreign.split(':')[0] if ':' in foreign else foreign
+                        network_iocs.append({
+                            'IP': ip,
+                            'Port': port,
+                            'Process': c.get('Owner'),
+                            'State': c.get('State'),
+                            'Indicator': 'Known malware port'
+                        })
                 
                 if network_iocs:
-                    st.error(f"Found {len(network_iocs)} network IOCs")
+                    st.error(f"🚨 Found {len(network_iocs)} network IOCs")
                     st.dataframe(pd.DataFrame(network_iocs), height=300)
                 else:
-                    st.success("No network IOCs detected")
+                    st.success("✅ No network IOCs detected")
             
             with ioc_tabs[2]:
                 st.markdown("**Memory-based Indicators**")
                 
-                # Check for PowerShell and CMD
-                ps_procs = [p for p in procs if 'powershell' in str(p.get('ImageFileName', '')).lower()]
-                cmd_procs = [p for p in procs if 'cmd' in str(p.get('ImageFileName', '')).lower()]
+                # Check for shell processes (OS-aware)
+                if os_type.lower() == "windows":
+                    shell_keywords = ['powershell', 'cmd', 'wscript', 'cscript']
+                else:  # Linux/macOS
+                    shell_keywords = ['bash', 'sh', 'zsh', 'python', 'perl', 'ruby']
                 
-                if ps_procs or cmd_procs:
-                    st.warning("Detected potential injection vectors:")
-                    if ps_procs:
-                        st.write(f"**PowerShell processes:** {len(ps_procs)}")
-                        for p in ps_procs[:5]:
-                            st.write(f"  - {p.get('ImageFileName')} (PID: {p.get('PID')})")
-                    if cmd_procs:
-                        st.write(f"**CMD processes:** {len(cmd_procs)}")
-                        for p in cmd_procs[:5]:
-                            st.write(f"  - {p.get('ImageFileName')} (PID: {p.get('PID')})")
+                shell_procs = [p for p in procs if any(keyword in str(p.get('ImageFileName', '') or p.get('comm', '')).lower() for keyword in shell_keywords)]
+                
+                if shell_procs:
+                    st.warning(f"⚠️ Detected {len(shell_procs)} potential injection vectors:")
+                    for p in shell_procs[:10]:
+                        proc_name = p.get('ImageFileName') or p.get('comm', 'Unknown')
+                        proc_pid = p.get('PID') or p.get('pid')
+                        st.write(f"  - {proc_name} (PID: {proc_pid})")
                 else:
-                    st.success("No obvious memory indicators detected")
-            
-            with ioc_tabs[3]:
-                st.markdown("**Persistence Mechanisms**")
-                st.info("Common persistence locations to investigate:")
-                st.markdown("""
-                - Startup programs
-                - Scheduled tasks
-                - Registry Run keys
-                - Services
-                """)
-                
-                persistence_found = False
-                
-                if not persistence_found:
-                    st.success("No obvious persistence mechanisms detected")
-                else:
-                    st.warning("Persistence mechanisms require manual registry analysis")
-            
-            st.markdown("---")
-            
-            # # MITRE ATT&CK Mapping
-            # st.markdown("### MITRE ATT&CK Mapping")
-            
-            # techniques_found = []
-            
-            # # Check for various techniques
-            # if any('powershell' in str(p.get('ImageFileName', '')).lower() for p in procs):
-            #     techniques_found.append(("T1059.001", "PowerShell", "Execution"))
-            
-            # if any('cmd' in str(p.get('ImageFileName', '')).lower() for p in procs):
-            #     techniques_found.append(("T1059.003", "Windows Command Shell", "Execution"))
-            
-            # if any(c.get('State') == 'ESTABLISHED' for c in conns):
-            #     techniques_found.append(("T1071", "Application Layer Protocol", "Command and Control"))
-            
-            # if techniques_found:
-            #     tech_df = pd.DataFrame(techniques_found, columns=['Technique ID', 'Technique Name', 'Tactic'])
-            #     st.dataframe(tech_df, height=300)
-            # else:
-            #     st.info("No MITRE ATT&CK techniques mapped")
-
+                    st.success("✅ No obvious memory indicators detected")
 
 # SIDEBAR
 with st.sidebar:

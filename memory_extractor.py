@@ -59,8 +59,8 @@ class MemoryArtifactExtractor:
                 f"Place vol.py in the same folder or pass --vol-path."
             )
 
-        if self.os_type not in ("windows", "linux"):
-            self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows' or 'linux'.")
+        if self.os_type not in ("windows", "linux", "macos"):
+            self.result.warnings.append(f"OS type '{self.os_type}' not supported. Use 'windows', 'linux', or 'macos'.")
 
     def _run_volatility(
         self,
@@ -87,12 +87,16 @@ class MemoryArtifactExtractor:
             "json",
         ]
 
-        # Inject Linux ISF if needed — NO trailing spaces!
+        # Inject symbol files for Linux and macOS
         effective_extra_args = extra_global_args.copy()
         if self.os_type == "linux":
             has_isf = any(arg == "-u" for arg in effective_extra_args)
             if not has_isf:
                 effective_extra_args = ["-u", "https://raw.githubusercontent.com/leludo84/vol3-linux-profiles/main/banners-isf.json"] + effective_extra_args
+        elif self.os_type == "macos":
+            has_isf = any(arg == "-u" for arg in effective_extra_args)
+            if not has_isf:
+                effective_extra_args = ["-u", "https://github.com/Abyss-W4tcher/volatility3-symbols/raw/master/banners/banners.json"] + effective_extra_args
 
         cmd.extend(effective_extra_args)
         cmd.append(plugin)
@@ -107,7 +111,6 @@ class MemoryArtifactExtractor:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
-                # NO TIMEOUT
             )
         except Exception as e:
             msg = f"Failed to execute Volatility: {e}"
@@ -148,45 +151,135 @@ class MemoryArtifactExtractor:
                 self.result.warnings.append("Process extraction failed.")
                 return []
 
-            # Handle {"rows": [...], "columns": [...]} format
+            # DEBUG: Print raw data structure
+            logger.info("=" * 60)
+            logger.info("DEBUG: Linux raw data type: %s", type(data))
+            if isinstance(data, (list, dict)) and data:
+                sample = data[0] if isinstance(data, list) else list(data.values())[0] if isinstance(data, dict) else {}
+                logger.info("DEBUG: First entry sample: %s", json.dumps(sample, indent=2) if isinstance(sample, dict) else str(sample))
+            logger.info("=" * 60)
+
             entries = []
-            if isinstance(data, dict):
-                if "rows" in data:
-                    columns = data.get("columns", [])
-                    for row in data["rows"]:
-                        entry = dict(zip(columns, row))
-                        entries.append(entry)
-                elif "entries" in data:
-                    entries = data["entries"]
+            if isinstance(data, list):
+                # Direct list of dicts
+                entries = [item for item in data if isinstance(item, dict)]
+            elif isinstance(data, dict):
+                # Check for different structures
+                if "__children" in data:
+                    # Volatility tree structure
+                    entries = data.get("__children", [])
                 else:
-                    entries = list(data.values())  # fallback
-            elif isinstance(data, list):
-                entries = data
+                    # Flat dict structure
+                    entries = [v for v in data.values() if isinstance(v, dict)]
 
             normalized = []
             for p in entries:
                 if not isinstance(p, dict):
                     continue
+                
+                # Extract process name - try ALL possible field names
+                process_name = (
+                    p.get("COMM") or 
+                    p.get("comm") or
+                    p.get("NAME") or 
+                    p.get("name") or
+                    p.get("ImageFileName") or
+                    p.get("Command") or
+                    p.get("command") or
+                    "unknown"
+                )
+                
+                logger.debug("Process: %s (PID: %s)", process_name, p.get("PID") or p.get("pid"))
+                
                 normalized.append({
                     "PID": p.get("PID") or p.get("pid", 0),
-                    "ImageFileName": p.get("COMM") or p.get("comm", "unknown"),
+                    "ImageFileName": process_name,
+                    "comm": process_name,
                     "PPID": p.get("PPID") or p.get("ppid", 0),
                     "ImagePath": p.get("executable", ""),
                     "CommandLine": "",
                     "Threads": p.get("num_threads", 0),
                     "Wow64": False,
                     "SessionId": None,
-                    "User": p.get("uid", "Unknown"),
+                    "User": p.get("UID") or p.get("uid", "Unknown"),
                 })
+            
+            logger.info("Normalized %d Linux processes", len(normalized))
             return normalized
-        else:
+        
+        elif self.os_type == "macos":
+            plugin = "mac.pslist.PsList"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Process extraction failed.")
+                return []
+
+            # DEBUG: Print raw data structure
+            logger.info("=" * 60)
+            logger.info("DEBUG: macOS raw data type: %s", type(data))
+            if isinstance(data, (list, dict)) and data:
+                sample = data[0] if isinstance(data, list) else list(data.values())[0] if isinstance(data, dict) else {}
+                logger.info("DEBUG: First entry sample: %s", json.dumps(sample, indent=2) if isinstance(sample, dict) else str(sample))
+            logger.info("=" * 60)
+
+            entries = []
+            if isinstance(data, list):
+                # Direct list of dicts
+                entries = [item for item in data if isinstance(item, dict)]
+            elif isinstance(data, dict):
+                # Check for different structures
+                if "__children" in data:
+                    # Volatility tree structure
+                    entries = data.get("__children", [])
+                else:
+                    # Flat dict structure
+                    entries = [v for v in data.values() if isinstance(v, dict)]
+
+            normalized = []
+            for p in entries:
+                if not isinstance(p, dict):
+                    continue
+                
+                # Extract process name - try ALL possible field names
+                process_name = (
+                    p.get("NAME") or 
+                    p.get("name") or 
+                    p.get("COMM") or 
+                    p.get("comm") or
+                    p.get("ImageFileName") or
+                    p.get("Command") or
+                    p.get("command") or
+                    "unknown"
+                )
+                
+                logger.debug("Process: %s (PID: %s)", process_name, p.get("PID") or p.get("pid"))
+                
+                normalized.append({
+                    "PID": p.get("PID") or p.get("pid", 0),
+                    "ImageFileName": process_name,
+                    "comm": process_name,
+                    "PPID": p.get("PPID") or p.get("ppid", 0),
+                    "ImagePath": p.get("path", ""),
+                    "CommandLine": "",
+                    "Threads": p.get("num_threads", 0),
+                    "Wow64": False,
+                    "SessionId": None,
+                    "User": p.get("UID") or p.get("uid", "Unknown"),
+                })
+            
+            logger.info("Normalized %d macOS processes", len(normalized))
+            return normalized
+        
+        else:  # Windows
             plugin = "windows.pslist.PsList"
             data = self._run_volatility(plugin)
             if data is None:
                 self.result.warnings.append("Process extraction failed.")
                 return []
+            
+            # Windows data is usually already in the right format
             return data
-
+        
     def extract_connections(self) -> Any:
         if self.os_type == "linux":
             plugin = "linux.sockstat.Sockstat"
@@ -224,6 +317,114 @@ class MemoryArtifactExtractor:
                     "Owner": sock.get("Process") or sock.get("process", ""),
                 })
             return normalized
+        
+        elif self.os_type == "macos":
+            plugin = "mac.netstat.Netstat"
+            data = self._run_volatility(plugin)
+            if data is None:
+                self.result.warnings.append("Network connection extraction failed.")
+                return []
+
+            # DEBUG: Log what we received
+            logger.info("macOS netstat data type: %s", type(data))
+            if isinstance(data, dict):
+                logger.info("Data keys: %s", list(data.keys()))
+                if "__children" in data:
+                    logger.info("Found %d children", len(data["__children"]))
+                    if data["__children"]:
+                        logger.info("First child sample: %s", data["__children"][0])
+
+            entries = []
+            
+            # Volatility 3 JSON format with __children
+            if isinstance(data, dict) and "__children" in data:
+                for child in data["__children"]:
+                    if not isinstance(child, dict):
+                        continue
+                    
+                    proto = str(child.get("Proto", "")).strip().upper()
+                    
+                    # Skip UNIX sockets - only keep TCP/UDP
+                    if proto not in ['TCP', 'UDP', 'TCPV4', 'TCPV6', 'UDPV4', 'UDPV6']:
+                        continue
+                    
+                    # Check if Local IP is actually an IP address, not a file path
+                    local_ip = str(child.get("Local IP", "")).strip()
+                    if local_ip.startswith('/') or local_ip.startswith('\\'):
+                        # This is a UNIX socket path, skip it
+                        continue
+                    
+                    entries.append(child)
+                    
+            elif isinstance(data, list):
+                # Direct list of dictionaries
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    proto = str(item.get("Proto", "")).strip().upper()
+                    if proto not in ['TCP', 'UDP', 'TCPV4', 'TCPV6', 'UDPV4', 'UDPV6']:
+                        continue
+                    
+                    local_ip = str(item.get("Local IP", "")).strip()
+                    if local_ip.startswith('/') or local_ip.startswith('\\'):
+                        continue
+                    
+                    entries.append(item)
+            
+            logger.info("Filtered to %d TCP/UDP connections (excluded UNIX sockets)", len(entries))
+
+            normalized = []
+            for sock in entries:
+                # Get values with exact Volatility 3 column names
+                local_ip = str(sock.get("Local IP", "0.0.0.0")).strip()
+                local_port = sock.get("Local Port", 0)
+                remote_ip = str(sock.get("Remote IP", "0.0.0.0")).strip()
+                remote_port = sock.get("Remote Port", 0)
+                proto = str(sock.get("Proto", "TCP")).strip().upper()
+                state = str(sock.get("State", "")).strip()
+                process = str(sock.get("Process", "")).strip()
+                
+                # Clean up protocol name (remove v4/v6)
+                proto = proto.replace('V4', '').replace('V6', '')
+                
+                # Extract PID from "Process" field (format: "processname/pid")
+                pid = 0
+                if process and '/' in process:
+                    parts = process.split('/')
+                    if len(parts) == 2 and parts[1].isdigit():
+                        pid = int(parts[1])
+                        process_name = parts[0]
+                    else:
+                        process_name = process
+                else:
+                    process_name = process
+                
+                # Convert port to int if it's a string
+                try:
+                    local_port = int(local_port) if local_port else 0
+                except (ValueError, TypeError):
+                    local_port = 0
+                
+                try:
+                    remote_port = int(remote_port) if remote_port else 0
+                except (ValueError, TypeError):
+                    remote_port = 0
+                
+                normalized.append({
+                    "Proto": proto,
+                    "LocalAddr": local_ip,
+                    "LocalPort": local_port,
+                    "ForeignAddr": remote_ip,
+                    "ForeignPort": remote_port,
+                    "State": state,
+                    "PID": pid,
+                    "Owner": process_name,
+                })
+            
+            logger.info("Successfully normalized %d macOS network connections", len(normalized))
+            return normalized
+        
         else:
             plugin = "windows.netscan.NetScan"
             data = self._run_volatility(plugin)
@@ -255,7 +456,7 @@ def main(argv: List[str]) -> int:
 
     parser = argparse.ArgumentParser(description="Memory Artifact Extractor")
     parser.add_argument("raw_file", help="Path to raw memory dump")
-    parser.add_argument("--os", default="windows", help="Guest OS type")
+    parser.add_argument("--os", default="windows", help="Guest OS type (windows/linux/macos)")
     parser.add_argument("--vol-path", default=None, help="Path to vol.py")
     parser.add_argument("--output", default=None, help="Output JSON path")
     parser.add_argument("--session", help="Session directory")
